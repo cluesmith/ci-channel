@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "ci": {
+      "command": "npx",
+      "args": ["tsx", "server.ts"],
+      "cwd": "${CLAUDE_PLUGIN_ROOT}"
+    }
+  }
+}

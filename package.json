@@ -1,0 +1,31 @@
+{
+  "name": "ci-channel",
+  "version": "0.1.0",
+  "description": "Claude Code channel plugin for real-time GitHub Actions CI/CD failure notifications",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cluesmith/ci-channel.git"
+  },
+  "keywords": [
+    "claude-code",
+    "mcp",
+    "github-actions",
+    "ci",
+    "notifications",
+    "channel-plugin"
+  ],
+  "scripts": {
+    "start": "node --import tsx/esm server.ts",
+    "build": "echo 'No build step — tsx runs TypeScript directly'",
+    "test": "node --import tsx/esm --test tests/*.test.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "tsx": "^4.21.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0"
+  }
+}

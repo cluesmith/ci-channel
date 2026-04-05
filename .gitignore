@@ -1,0 +1,20 @@
+node_modules/
+bun.lock
+package-lock.json
+
+# Environment / secrets
+.env
+*.env.local
+
+# Codev
+.agent-farm/
+.consult/
+codev/.update-hashes.json
+.builders/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temp
+tmp/

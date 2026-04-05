@@ -1,0 +1,6 @@
+{
+  "name": "ci",
+  "description": "Push CI/CD failure notifications from GitHub, GitLab, or Gitea into your Claude Code session",
+  "version": "0.1.0",
+  "author": { "name": "Cluesmith" }
+}
