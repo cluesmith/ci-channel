@@ -9,14 +9,15 @@
 
 The issue (#1) is comprehensive. Key decisions extracted from it:
 
-1. **Q**: Should forge be auto-detected from the webhook payload? **A**: No. The issue explicitly states "No forge auto-detection from webhook payload (explicit config)" — use `FORGE` env var.
+1. **Q**: Should forge be auto-detected from the webhook payload? **A**: No. The issue explicitly states "No forge auto-detection from webhook payload (explicit config)" — use `--forge` CLI arg.
 2. **Q**: Should Bitbucket be supported? **A**: Not in v1. The issue says "No support for Bitbucket in v1 (can be added later)."
 3. **Q**: Should the notification format change? **A**: No. The issue states "No changes to the MCP channel protocol or notification format."
-4. **Q**: Should existing GitHub-only configs work without changes? **A**: Yes. `FORGE` defaults to `github`, maintaining backward compatibility.
+4. **Q**: Should existing GitHub-only configs work without changes? **A**: Yes. `--forge` defaults to `github`, maintaining backward compatibility.
+5. **Q**: Where should configuration live? **A**: Structural config (forge, repos, workflow-filter, reconcile-branches) via CLI args in `.mcp.json`. Secrets (WEBHOOK_SECRET, GITEA_TOKEN) stay in `.env` file. CLI args > env vars > `.env` file precedence.
 
 ## Problem Statement
 
-The CI channel plugin currently only supports GitHub Actions. It hardcodes GitHub-specific webhook headers (`x-github-event`, `x-github-delivery`, `x-hub-signature-256`), GitHub payload structures (`workflow_run`), and GitHub CLI commands (`gh run list`, `gh api`). Teams using GitLab CI or Gitea Actions cannot use this plugin.
+The CI channel plugin (Spec 0) currently only supports GitHub Actions. It hardcodes GitHub-specific webhook headers (`x-github-event`, `x-github-delivery`, `x-hub-signature-256`), GitHub payload structures (`workflow_run`), and GitHub CLI commands (`gh run list`, `gh api`). Teams using GitLab CI or Gitea Actions cannot use this plugin.
 
 The plugin was renamed from `github-ci-channel` to `ci-channel` to reflect the intended broader scope, but the implementation remains GitHub-only.
 
@@ -40,7 +41,7 @@ The `notify.ts` module is already forge-agnostic — it accepts a `WebhookEvent`
 
 ## Desired State
 
-The plugin supports three forges — GitHub Actions, GitLab CI, and Gitea Actions — selected via a `FORGE` environment variable. Each forge has its own:
+The plugin supports three forges — GitHub Actions, GitLab CI, and Gitea Actions — selected via the `--forge` CLI arg (configured in `.mcp.json`). Each forge has its own:
 
 - Webhook signature validation logic
 - Webhook payload parsing (extracting the common `WebhookEvent` fields)
@@ -49,7 +50,22 @@ The plugin supports three forges — GitHub Actions, GitLab CI, and Gitea Action
 
 The rest of the system (notification formatting, deduplication, allowlist/filter checks, MCP push) remains unchanged because it already works with the forge-agnostic `WebhookEvent` interface.
 
-Existing GitHub-only configurations work without any changes (the `FORGE` env var defaults to `github`).
+Existing GitHub-only configurations work without any changes (`--forge` defaults to `github`).
+
+**Configuration model**: Structural config (forge, repos, workflow-filter, reconcile-branches) is passed as CLI args in `.mcp.json`, keeping the full server config in one place. Secrets (WEBHOOK_SECRET, GITEA_TOKEN) remain in `~/.claude/channels/ci/.env`. Precedence: CLI args > env vars > `.env` file.
+
+Example `.mcp.json` for GitLab:
+```json
+{
+  "mcpServers": {
+    "ci": {
+      "command": "npx",
+      "args": ["tsx", "server.ts", "--forge", "gitlab", "--repos", "mygroup/myproject"],
+      "cwd": "/path/to/ci-channel"
+    }
+  }
+}
+```
 
 **Timing clarification**: The server delays 5 seconds after MCP handshake before starting reconciliation (`setTimeout` in `server.ts`). Reconciliation itself has a 10-second total execution budget (`totalBudgetMs` in `reconcile.ts`). Both values are preserved.
 
@@ -59,20 +75,21 @@ Existing GitHub-only configurations work without any changes (the `FORGE` env va
 - **Technical Team**: CI channel plugin maintainers
 
 ## Success Criteria
-- [ ] `FORGE=github` (or unset): existing behavior is identical, all 83 existing tests pass
-- [ ] `FORGE=gitlab`: GitLab CI pipeline webhooks are received, validated (token header), parsed, and pushed as notifications
-- [ ] `FORGE=gitea`: Gitea Actions webhooks are received, validated (HMAC-SHA256), parsed, and pushed as notifications
-- [ ] Each forge has startup reconciliation using its native CLI (`gh`, `glab`, `tea`)
+- [ ] `--forge github` (or no `--forge` arg): existing behavior is identical, all 83 existing tests pass
+- [ ] `--forge gitlab`: GitLab CI pipeline webhooks are received, validated (token header), parsed, and pushed as notifications
+- [ ] `--forge gitea`: Gitea Actions webhooks are received, validated (HMAC-SHA256), parsed, and pushed as notifications
+- [ ] Each forge has startup reconciliation using its native CLI (`gh`, `glab`) or API (`fetch` for Gitea)
 - [ ] Each forge has failed-job enrichment using its native CLI/API
-- [ ] Invalid `FORGE` value causes a clear error at startup (fail fast)
-- [ ] Backward compatibility: existing configs with `GITHUB_REPOS` continue to work
+- [ ] Invalid `--forge` value causes a clear error at startup (fail fast)
+- [ ] Structural config works via CLI args (`--forge`, `--repos`, `--workflow-filter`, `--reconcile-branches`)
+- [ ] Backward compatibility: existing env-var-only configs (including `GITHUB_REPOS`) continue to work
 - [ ] Test coverage for all three forges (unit + integration)
 - [ ] Documentation updated (README, arch.md, CLAUDE.md)
 
 ## Constraints
 
 ### Technical Constraints
-- Must maintain the existing `WebhookEvent` interface as the common type — all forge parsers produce this same shape. All forge run/pipeline IDs are numeric (GitHub `id`, GitLab `object_attributes.id`, Gitea `id`), so `runId: number` is safe across all forges.
+- Must maintain the existing `WebhookEvent` interface (from Spec 0) as the common type — all forge parsers produce this same shape. All forge run/pipeline IDs are numeric (GitHub `id`, GitLab `object_attributes.id`, Gitea `id`), so `runId: number` is safe across all forges.
 - Must preserve the MCP stdio isolation pattern (`stdin: 'ignore'` on all subprocesses)
 - Must preserve the 5-second startup delay before reconciliation and the 10-second reconciliation execution budget
 - Must preserve the fire-and-forget async enrichment pattern
@@ -85,7 +102,7 @@ Existing GitHub-only configurations work without any changes (the `FORGE` env va
 
 ## Assumptions
 - GitLab users have `glab` CLI installed (best-effort, same as `gh` for GitHub). If missing, startup reconciliation and job enrichment are skipped with a warning — the same behavior as `gh` missing today.
-- Gitea users have `tea` CLI installed (best-effort). If `tea` lacks CI features, the Gitea forge uses direct HTTP API calls via Node's built-in `fetch` (not curl) to `GITEA_URL` (required for Gitea forge).
+- Gitea forge uses direct HTTP API calls via Node's built-in `fetch` to `--gitea-url`. The `tea` CLI is not used (limited CI support). `GITEA_TOKEN` env var provides optional authentication.
 - Each deployment targets a single forge (no mixed-forge mode)
 - smee.io relay works for all three forges — it proxies raw HTTP POSTs and preserves all headers (signature, event type, delivery ID). This is how smee works by design.
 
@@ -141,10 +158,11 @@ The reconciliation and enrichment methods receive the full `Config` object so th
 ## Open Questions
 
 ### Critical (Blocks Progress)
-- [x] Forge selection mechanism → Answered: `FORGE` env var, default `github`
+- [x] Forge selection mechanism → Answered: `--forge` CLI arg (default `github`). Also accepted as `FORGE` env var for backward compat (CLI arg takes precedence).
+- [x] Configuration model → Answered: Structural config via CLI args in `.mcp.json`, secrets in `.env`. Precedence: CLI args > env vars > `.env` file.
 
 ### Important (Affects Design)
-- [x] Repo allowlist configuration → Simplified: Use a single `REPOS` env var (maps to `config.repos`). `GITHUB_REPOS` is kept as a backward-compatible alias — if `REPOS` is not set and `GITHUB_REPOS` is set, use `GITHUB_REPOS`. If both are set, `REPOS` takes precedence. `GITHUB_REPOS` is accepted regardless of forge (it's just a repo list — the name is legacy). No forge-specific `GITLAB_REPOS` or `GITEA_REPOS` vars.
+- [x] Repo allowlist configuration → Use `--repos` CLI arg (maps to `config.repos`). Also accepted via `REPOS` or `GITHUB_REPOS` env vars. Precedence: `--repos` > `REPOS` > `GITHUB_REPOS`. `GITHUB_REPOS` is accepted regardless of forge (it's just a repo list — the name is legacy). No forge-specific `GITLAB_REPOS` or `GITEA_REPOS` vars.
 - [x] Webhook route path → Keep `/webhook/github` as the primary route for backward compatibility. Add `/webhook` as an alias that works for all forges. Both routes go to the same handler. This avoids breaking existing webhook senders and smee configurations. The smee target URL uses the forge-appropriate route (`/webhook/github` for github, `/webhook` for others).
 - [x] GitLab nested namespaces → `isRepoAllowed()` uses exact string match, which already handles `group/subgroup/project` — users just need to configure the exact `path_with_namespace` value from GitLab. No code change needed, but document this in README.
 
@@ -177,8 +195,8 @@ The reconciliation and enrichment methods receive the full `Config` object so th
 - **Delivery ID header**: `X-Gitea-Delivery` (UUID)
 - **Payload structure**: Very similar to GitHub's `workflow_run` — `{ action, workflow_run: { name, conclusion, head_branch, head_sha, head_commit, html_url, id }, repository: { full_name } }`
 - **Completion semantics**: Same as GitHub — `action === "completed"`, all conclusions reported.
-- **Reconciliation**: Uses Gitea API via Node's built-in `fetch` (not `tea` CLI, which has limited CI support). Requires `GITEA_URL` config (e.g., `https://gitea.example.com`). Optional `GITEA_TOKEN` for auth. API endpoint: `GET {GITEA_URL}/api/v1/repos/{owner}/{repo}/actions/runs?branch={b}&limit=1`. If `GITEA_URL` is not configured when `FORGE=gitea`, reconciliation is skipped with a warning (same best-effort pattern as `gh` missing for GitHub).
-- **Job enrichment**: Gitea API via `fetch`: `GET {GITEA_URL}/api/v1/repos/{owner}/{repo}/actions/runs/{id}/jobs`. Filter for jobs with `conclusion === "failure"`. Uses the same `GITEA_URL` and `GITEA_TOKEN` config.
+- **Reconciliation**: Uses Gitea API via Node's built-in `fetch` (not `tea` CLI, which has limited CI support). Requires `--gitea-url` config (e.g., `https://gitea.example.com`). Optional `GITEA_TOKEN` env var for auth. API endpoint: `GET {GITEA_URL}/api/v1/repos/{owner}/{repo}/actions/runs?branch={b}&limit=1`. If `--gitea-url` is not configured when `--forge gitea`, reconciliation is skipped with a warning (same best-effort pattern as `gh` missing for GitHub).
+- **Job enrichment**: Gitea API via `fetch`: `GET {GITEA_URL}/api/v1/repos/{owner}/{repo}/actions/runs/{id}/jobs`. Filter for jobs with `conclusion === "failure"`. Uses the same `--gitea-url` and `GITEA_TOKEN` config.
 
 ## Performance Requirements
 - **Webhook response time**: <100ms p95 (same as current — signature check + JSON parse + notification push)
@@ -208,10 +226,11 @@ The reconciliation and enrichment methods receive the full `Config` object so th
 8. **Gitea forge**: HMAC-SHA256 validation via `X-Gitea-Signature` (raw hex, no prefix)
 9. **Gitea forge**: Parse `workflow_run` payload (GitHub-like structure)
 10. **Gitea forge**: API-based reconciliation and job enrichment (mock HTTP responses)
-11. **Config**: `REPOS` takes precedence over `GITHUB_REPOS`
-12. **Config**: `GITHUB_REPOS` works as fallback when `REPOS` not set
-13. **Config**: Invalid `FORGE` value throws at config load time
-14. **Config**: `FORGE=gitea` without `GITEA_URL` — reconciliation skipped with warning
+11. **Config**: `--repos` CLI arg takes precedence over `REPOS` env var over `GITHUB_REPOS`
+12. **Config**: `GITHUB_REPOS` env var works as fallback when `--repos` and `REPOS` not set
+13. **Config**: Invalid `--forge` value throws at config load time
+14. **Config**: `--forge gitea` without `--gitea-url` — reconciliation skipped with warning
+15. **Config**: CLI args parsed correctly from `process.argv`
 15. **Route**: Both `/webhook` and `/webhook/github` accepted
 16. **Backward compat**: No `FORGE` env var → defaults to `github`, all existing behavior preserved
 17. **Reconciliation**: CLI missing (gh/glab not installed) → skipped with warning, startup continues
@@ -224,8 +243,9 @@ The reconciliation and enrichment methods receive the full `Config` object so th
 Test fixtures for GitLab and Gitea must be based on documented webhook payload schemas (GitLab docs, Gitea docs), not invented shapes. Each forge needs at least one realistic fixture for a completed/failed pipeline/workflow.
 
 ## Dependencies
-- **External CLIs**: `gh` (GitHub), `glab` (GitLab), `tea` (Gitea) — all optional, best-effort
-- **No new npm dependencies**: Forge implementations use Node.js built-ins (`crypto`, `child_process`)
+- **External CLIs**: `gh` (GitHub), `glab` (GitLab) — optional, best-effort for reconciliation/enrichment
+- **Gitea**: Uses Node.js built-in `fetch` against `--gitea-url` API (no external CLI needed)
+- **No new npm dependencies**: Forge implementations use Node.js built-ins (`crypto`, `child_process`, `fetch`)
 
 ## Risks and Mitigation
 | Risk | Probability | Impact | Mitigation Strategy |
@@ -237,17 +257,49 @@ Test fixtures for GitLab and Gitea must be based on documented webhook payload s
 
 ## Configuration Changes
 
-New and changed environment variables:
+Configuration is split between CLI args (structural) and env vars/`.env` (secrets).
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `FORGE` | No | `github` | Forge type: `github`, `gitlab`, or `gitea` |
-| `REPOS` | No | — | Comma-separated repo/project allowlist (all forges) |
-| `GITHUB_REPOS` | No | — | Legacy alias for `REPOS` (backward compat) |
-| `GITEA_URL` | Gitea only | — | Gitea instance base URL (for API-based reconciliation/enrichment) |
-| `GITEA_TOKEN` | No | — | Gitea API token for authentication |
+### CLI args (structural config, in `.mcp.json`)
 
-Precedence: `REPOS` > `GITHUB_REPOS`. Both resolve to `config.repos`.
+| Arg | Default | Description |
+|-----|---------|-------------|
+| `--forge` | `github` | Forge type: `github`, `gitlab`, or `gitea` |
+| `--repos` | — | Comma-separated repo/project allowlist |
+| `--workflow-filter` | — | Comma-separated workflow names to monitor |
+| `--reconcile-branches` | `ci,develop` | Branches to check on startup |
+| `--port` | `8789` | HTTP server port |
+| `--gitea-url` | — | Gitea instance base URL (required for Gitea reconciliation/enrichment) |
+| `--smee-url` | — | smee.io channel URL |
+
+### Env vars / `.env` (secrets only)
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `WEBHOOK_SECRET` | Yes | HMAC-SHA256 shared secret (or GitLab token) |
+| `GITEA_TOKEN` | No | Gitea API token for authentication |
+
+### Backward-compatible env vars
+
+These env vars continue to work for users who haven't migrated to CLI args:
+
+| Env var | Maps to | Notes |
+|---------|---------|-------|
+| `FORGE` | `--forge` | CLI arg takes precedence |
+| `REPOS` | `--repos` | CLI arg takes precedence |
+| `GITHUB_REPOS` | `--repos` | Legacy alias, lowest precedence |
+| `PORT` | `--port` | CLI arg takes precedence |
+| `SMEE_URL` | `--smee-url` | CLI arg takes precedence |
+| `WORKFLOW_FILTER` | `--workflow-filter` | CLI arg takes precedence |
+| `RECONCILE_BRANCHES` | `--reconcile-branches` | CLI arg takes precedence |
+| `GITEA_URL` | `--gitea-url` | CLI arg takes precedence |
+
+### Precedence
+
+CLI args > env vars > `.env` file. For repos specifically: `--repos` > `REPOS` > `GITHUB_REPOS`.
+
+### Arg parsing
+
+Simple `process.argv` iteration — no heavy CLI framework. The server iterates `process.argv.slice(2)` and consumes `--flag value` pairs. Unknown flags cause a startup error (fail fast).
 
 ## WebhookEvent Field Mapping
 
@@ -268,14 +320,18 @@ All forges produce the same `WebhookEvent` interface. Field sources per forge:
 
 All fields marked as `string | null` in the interface remain nullable — forge parsers use `?? null` for missing optional fields (commitMessage, commitAuthor).
 
+## References
+- **Spec 0**: `codev/specs/0-ci-channel-plugin.md` — the original CI channel plugin spec. Defines the `WebhookEvent` interface, webhook handler pipeline, notification format, and reconciliation pattern that this spec extends.
+- **Codev forge abstraction**: `packages/codev/src/lib/forge.ts` in the codev project — reference implementation for the strategy pattern approach.
+
 ## Notes
 
-The `WebhookEvent` interface and `notify.ts` module are already forge-agnostic. The refactoring primarily affects:
+The `WebhookEvent` interface (Spec 0) and `notify.ts` module are already forge-agnostic. The refactoring primarily affects:
 - `webhook.ts` → extract GitHub logic into a forge implementation, create GitLab/Gitea implementations
 - `handler.ts` → call forge methods instead of hardcoded GitHub headers
 - `reconcile.ts` → extract GitHub CLI calls into forge implementations
-- `config.ts` → add `FORGE` env var, `REPOS` alias, Gitea-specific config, keep backward-compatible `GITHUB_REPOS`
-- `server.ts` → add `/webhook` route alias, select forge from config
+- `config.ts` → add `--forge` CLI arg parsing, `--repos` arg, Gitea-specific config, backward-compatible env var fallbacks
+- `server.ts` → add `/webhook` route alias, pass `process.argv` to config, select forge from config
 
 ## Expert Consultation
 
@@ -289,11 +345,17 @@ The `WebhookEvent` interface and `notify.ts` module are already forge-agnostic. 
 **Key feedback addressed**:
 - GitLab completion semantics: Clarified terminal states (success, failed, canceled, skipped)
 - GitLab dedup key: Now includes status to prevent suppressing legitimate state transitions
-- Gitea reconciliation: Specified API-based approach with `GITEA_URL`/`GITEA_TOKEN` config instead of underspecified `tea` CLI
+- Gitea reconciliation: Specified API-based approach with `--gitea-url`/`GITEA_TOKEN` config instead of underspecified `tea` CLI
 - Route backward compatibility: `/webhook/github` kept as alias, `/webhook` added as generic route
-- Repo allowlist: Simplified to `REPOS` with `GITHUB_REPOS` as legacy fallback, works for all forges
+- Repo allowlist: Simplified to `--repos` with `REPOS`/`GITHUB_REPOS` as legacy fallbacks
 - GitLab token validation: Clarified length-mismatch behavior (immediate reject, no padding)
 - GitLab nested namespaces: Acknowledged, no code change needed, documented
 - Timing clarification: Separated 5s startup delay from 10s reconciliation budget
 - Test fixtures: Required to be based on documented webhook schemas
 - Missing test scenarios: Added config precedence, CLI-missing, route alias, nested namespace tests
+
+**Architect feedback (2026-04-05)**:
+- Added Spec 0 reference throughout (original CI channel plugin spec)
+- Configuration model changed: structural config via CLI args in `.mcp.json`, secrets in `.env`
+- Added CLI arg parsing specification (`process.argv` iteration)
+- Backward-compatible env var fallbacks documented with precedence rules
