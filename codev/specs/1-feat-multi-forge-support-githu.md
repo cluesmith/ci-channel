@@ -67,6 +67,15 @@ Example `.mcp.json` for GitLab:
 }
 ```
 
+**Port assignment**: The HTTP server defaults to port 0 (OS-assigned random port), so multiple Claude Code sessions can coexist without `EADDRINUSE` conflicts. The `--port` CLI arg is an optional override only. The startup flow changes:
+1. HTTP server starts on port 0 (or `--port` if specified)
+2. OS assigns an available port
+3. Read actual port from `httpServer.address().port`
+4. Spawn smee-client targeting `http://127.0.0.1:{actual_port}/webhook` (using the real port)
+5. Start reconciliation after 5-second delay
+
+This means smee-client must be spawned AFTER the HTTP server starts listening, not at module top-level. The smee.io channel URL (public relay) is unchanged — only the local target port is dynamic.
+
 **Timing clarification**: The server delays 5 seconds after MCP handshake before starting reconciliation (`setTimeout` in `server.ts`). Reconciliation itself has a 10-second total execution budget (`totalBudgetMs` in `reconcile.ts`). Both values are preserved.
 
 ## Stakeholders
@@ -82,6 +91,8 @@ Example `.mcp.json` for GitLab:
 - [ ] Each forge has failed-job enrichment using its native CLI/API
 - [ ] Invalid `--forge` value causes a clear error at startup (fail fast)
 - [ ] Structural config works via CLI args (`--forge`, `--repos`, `--workflow-filter`, `--reconcile-branches`)
+- [ ] Default port 0 allows multiple concurrent sessions without `EADDRINUSE`
+- [ ] smee-client spawned after HTTP server starts, using actual assigned port
 - [ ] Backward compatibility: existing env-var-only configs (including `GITHUB_REPOS`) continue to work
 - [ ] Test coverage for all three forges (unit + integration)
 - [ ] Documentation updated (README, arch.md, CLAUDE.md)
@@ -267,7 +278,7 @@ Configuration is split between CLI args (structural) and env vars/`.env` (secret
 | `--repos` | — | Comma-separated repo/project allowlist |
 | `--workflow-filter` | — | Comma-separated workflow names to monitor |
 | `--reconcile-branches` | `ci,develop` | Branches to check on startup |
-| `--port` | `8789` | HTTP server port |
+| `--port` | `0` (OS-assigned) | HTTP server port (0 = random available port) |
 | `--gitea-url` | — | Gitea instance base URL (required for Gitea reconciliation/enrichment) |
 | `--smee-url` | — | smee.io channel URL |
 
@@ -287,7 +298,7 @@ These env vars continue to work for users who haven't migrated to CLI args:
 | `FORGE` | `--forge` | CLI arg takes precedence |
 | `REPOS` | `--repos` | CLI arg takes precedence |
 | `GITHUB_REPOS` | `--repos` | Legacy alias, lowest precedence |
-| `PORT` | `--port` | CLI arg takes precedence |
+| `PORT` | `--port` | CLI arg takes precedence. Legacy default was 8789; new default is 0 |
 | `SMEE_URL` | `--smee-url` | CLI arg takes precedence |
 | `WORKFLOW_FILTER` | `--workflow-filter` | CLI arg takes precedence |
 | `RECONCILE_BRANCHES` | `--reconcile-branches` | CLI arg takes precedence |
@@ -359,3 +370,6 @@ The `WebhookEvent` interface (Spec 0) and `notify.ts` module are already forge-a
 - Configuration model changed: structural config via CLI args in `.mcp.json`, secrets in `.env`
 - Added CLI arg parsing specification (`process.argv` iteration)
 - Backward-compatible env var fallbacks documented with precedence rules
+- Default port changed from 8789 to 0 (OS-assigned random port) for multi-session coexistence
+- smee-client must spawn AFTER HTTP server starts, using actual assigned port
+- Eliminates EADDRINUSE failure mode when multiple Claude sessions run concurrently
