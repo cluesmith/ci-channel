@@ -1,6 +1,19 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { fetchFailedJobs } from '../lib/reconcile.js'
+import { githubForge } from '../lib/forges/github.js'
+import type { Config } from '../lib/config.js'
+
+const dummyConfig: Config = {
+  forge: 'github',
+  webhookSecret: 'test',
+  port: 0,
+  smeeUrl: null,
+  repos: null,
+  workflowFilter: null,
+  reconcileBranches: ['ci', 'develop'],
+  giteaUrl: null,
+  giteaToken: null,
+}
 
 // Note: runStartupReconciliation is harder to unit test because it spawns
 // child processes internally. We test fetchFailedJobs which uses the same
@@ -8,15 +21,12 @@ import { fetchFailedJobs } from '../lib/reconcile.js'
 
 describe('fetchFailedJobs', () => {
   test('returns null when gh is not available', async () => {
-    // This test relies on the fact that `gh api` for a nonexistent repo
-    // will fail, returning null from our function
-    const result = await fetchFailedJobs('nonexistent/repo-that-does-not-exist-abc123', 0)
+    const result = await githubForge.fetchFailedJobs(dummyConfig, 'nonexistent/repo-that-does-not-exist-abc123', 0)
     assert.strictEqual(result, null)
   })
 
   test('returns null on timeout (tested via invalid command)', async () => {
-    // fetchFailedJobs has a 3s timeout; calling with invalid args should return null
-    const result = await fetchFailedJobs('', 0)
+    const result = await githubForge.fetchFailedJobs(dummyConfig, '', 0)
     assert.strictEqual(result, null)
   })
 })
