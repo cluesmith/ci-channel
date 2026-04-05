@@ -93,7 +93,10 @@ export const gitlabForge: Forge = {
       timeoutMs,
     )
 
-    if (!output) return null
+    if (!output) {
+      console.error(`[ci-channel] Startup reconciliation: could not check branch "${branch}" (glab unavailable or timed out)`)
+      return null
+    }
 
     let pipelines: any[]
     try {
@@ -110,7 +113,7 @@ export const gitlabForge: Forge = {
 
     return {
       deliveryId: `reconcile-${branch}-${pipeline.id ?? 'unknown'}`,
-      workflowName: pipeline.source ?? 'pipeline',
+      workflowName: pipeline.name ?? pipeline.source ?? 'pipeline',
       conclusion: pipeline.status,
       branch: pipeline.ref ?? branch,
       commitSha: pipeline.sha ?? 'unknown',

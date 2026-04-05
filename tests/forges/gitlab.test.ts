@@ -2,6 +2,19 @@ import { describe, test, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { gitlabForge } from '../../lib/forges/gitlab.js'
 import { clearDedup } from '../../lib/webhook.js'
+import type { Config } from '../../lib/config.js'
+
+const dummyConfig: Config = {
+  forge: 'gitlab',
+  webhookSecret: 'test',
+  port: 0,
+  smeeUrl: null,
+  repos: null,
+  workflowFilter: null,
+  reconcileBranches: ['main'],
+  giteaUrl: null,
+  giteaToken: null,
+}
 
 const SECRET = 'gitlab-test-token'
 
@@ -272,5 +285,24 @@ describe('gitlabForge.parseWebhookEvent', () => {
     if (result.type === 'event') {
       assert.strictEqual(result.event.repoFullName, 'group/subgroup/project')
     }
+  })
+})
+
+describe('gitlabForge.runReconciliation', () => {
+  test('returns null when glab is not available', async () => {
+    const result = await gitlabForge.runReconciliation(dummyConfig, 'main', 3000)
+    assert.strictEqual(result, null)
+  })
+})
+
+describe('gitlabForge.fetchFailedJobs', () => {
+  test('returns null when glab is not available', async () => {
+    const result = await gitlabForge.fetchFailedJobs(dummyConfig, 'nonexistent/project', 0)
+    assert.strictEqual(result, null)
+  })
+
+  test('returns null for empty repo name', async () => {
+    const result = await gitlabForge.fetchFailedJobs(dummyConfig, '', 0)
+    assert.strictEqual(result, null)
   })
 })

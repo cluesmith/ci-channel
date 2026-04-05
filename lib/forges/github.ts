@@ -86,7 +86,10 @@ export const githubForge: Forge = {
       timeoutMs,
     )
 
-    if (!output) return null
+    if (!output) {
+      console.error(`[ci-channel] Startup reconciliation: could not check branch "${branch}" (gh unavailable or timed out)`)
+      return null
+    }
 
     let runs: any[]
     try {
