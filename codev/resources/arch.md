@@ -1,62 +1,86 @@
 # CI Channel — Architecture
 
-> Last updated: 2026-04-04
+> Last updated: 2026-04-05
 
 ## Overview
 
-A Claude Code channel plugin that receives GitHub Actions webhook events via a local HTTP server and pushes structured CI notifications into running Claude Code sessions. Push-based (not polling), with startup reconciliation for offline failures and async job-detail enrichment.
+A Claude Code channel plugin that receives CI/CD webhook events from multiple forges (GitHub Actions, GitLab CI, Gitea Actions) via a local HTTP server and pushes structured notifications into running Claude Code sessions. Push-based (not polling), with auto-provisioning on first run, startup reconciliation for offline failures, and async job-detail enrichment.
 
 ## Technology Stack
 
 | Layer | Technology | Version |
 |-------|-----------|---------|
-| Runtime | Node.js (via tsx) | 18+ |
+| Runtime | Node.js (via tsx) | 20+ |
 | Language | TypeScript | — |
 | Protocol | MCP (Model Context Protocol) | SDK ^1.12.1 |
 | Transport | stdio (MCP) + HTTP (webhooks) | — |
 | Testing | node:test (built-in) | Node 20+ |
-| Webhook proxy | smee.io / smee-client | — |
-| CLI dependency | gh (GitHub CLI) | optional |
+| Webhook proxy | smee-client (in-process) | ^2.0.4 |
+| CLI dependencies | gh, glab (optional) | — |
 
 ## Directory Structure
 
 ```
 ci-channel/
-├── server.ts                  # Entry point: MCP server + HTTP server + smee + reconciliation
+├── server.ts                  # Entry point: MCP server + HTTP server + bootstrap + reconciliation
 ├── lib/
-│   ├── config.ts              # Configuration loading (.env + env vars)
+│   ├── forge.ts               # Forge interface definition (strategy pattern)
+│   ├── forges/
+│   │   ├── github.ts          # GitHub Actions forge implementation
+│   │   ├── gitlab.ts          # GitLab CI forge implementation
+│   │   └── gitea.ts           # Gitea Actions forge implementation
+│   ├── config.ts              # Configuration loading (CLI args + env vars + .env)
+│   ├── bootstrap.ts           # First-run auto-provisioning (secret, smee, notification)
 │   ├── handler.ts             # Webhook handler pipeline (orchestrates the flow)
-│   ├── webhook.ts             # Signature validation, event parsing, dedup, filtering
+│   ├── webhook.ts             # WebhookEvent interface, dedup, filtering (forge-agnostic)
 │   ├── notify.ts              # Notification formatting, sanitization, MCP push
-│   └── reconcile.ts           # Startup reconciliation + async job enrichment
+│   └── reconcile.ts           # Startup reconciliation orchestration
 ├── tests/
-│   ├── config.test.ts         # 20 tests — config loading
-│   ├── webhook.test.ts        # 25 tests — signatures, parsing, dedup, filtering
-│   ├── notify.test.ts         # 18 tests — sanitization, formatting
-│   ├── reconcile.test.ts      # 6 tests — reconciliation, job fetching
-│   ├── integration.test.ts    # 9 tests — full HTTP pipeline
-│   ├── stdio-lifecycle.test.ts # 1 test — MCP stdio stability
+│   ├── forges/
+│   │   ├── gitlab.test.ts     # GitLab forge unit tests
+│   │   └── gitea.test.ts      # Gitea forge unit tests
+│   ├── config.test.ts         # Config loading, CLI args, precedence
+│   ├── webhook.test.ts        # GitHub forge + shared webhook tests
+│   ├── notify.test.ts         # Sanitization, formatting
+│   ├── bootstrap.test.ts      # Auto-provisioning with injected deps
+│   ├── reconcile.test.ts      # Reconciliation, job enrichment
+│   ├── integration.test.ts    # GitHub HTTP pipeline end-to-end
+│   ├── integration-gitlab.test.ts  # GitLab HTTP pipeline end-to-end
+│   ├── integration-gitea.test.ts   # Gitea HTTP pipeline end-to-end
+│   ├── stdio-lifecycle.test.ts     # MCP stdio stability regression
 │   └── fixtures/
-│       └── workflow-run-failure.json
+│       ├── workflow-run-failure.json      # GitHub webhook payload
+│       ├── gitlab-pipeline-failure.json   # GitLab webhook payload
+│       └── gitea-workflow-run-failure.json # Gitea webhook payload
 ├── .claude-plugin/
 │   └── plugin.json            # Plugin metadata for Claude Code
 ├── .mcp.json                  # MCP server registration
-├── codev/                     # Development methodology (specs, plans, reviews)
-│   ├── specs/
-│   ├── plans/
-│   ├── reviews/
-│   └── resources/
-│       ├── arch.md            # This file
-│       └── lessons-learned.md
+├── codev/                     # Development methodology
 ├── package.json
-├── CLAUDE.md                  # Claude Code-specific instructions
-├── AGENTS.md                  # Cross-tool AI agent instructions
-├── README.md                  # User-facing documentation
-├── CONTRIBUTING.md            # Contributor guide
-└── LICENSE                    # MIT
+├── CLAUDE.md
+├── README.md
+└── LICENSE
 ```
 
 ## Key Components
+
+### Forge Interface (`lib/forge.ts`)
+
+**Purpose**: Strategy pattern interface for multi-forge support.
+
+Each forge implements:
+- `validateSignature()` — Forge-specific webhook signature/token validation
+- `parseWebhookEvent()` — Forge-specific payload parsing into common `WebhookEvent`
+- `runReconciliation()` — Startup failure check via forge-specific CLI or API
+- `fetchFailedJobs()` — Async job name enrichment via forge-specific CLI or API
+
+### Forge Implementations
+
+| Forge | Signature | Event Type | CLI/API | File |
+|-------|-----------|------------|---------|------|
+| GitHub | HMAC-SHA256 (`X-Hub-Signature-256`) | `workflow_run` completed | `gh` CLI | `lib/forges/github.ts` |
+| GitLab | Token (`X-Gitlab-Token`) | `Pipeline Hook` terminal states | `glab` CLI | `lib/forges/gitlab.ts` |
+| Gitea | HMAC-SHA256 (`X-Gitea-Signature`, raw hex) | `workflow_run` completed | Gitea API via `fetch` | `lib/forges/gitea.ts` |
 
 ### MCP Server (`server.ts`)
 
@@ -65,42 +89,54 @@ ci-channel/
 Responsibilities:
 - Creates MCP `Server` with `claude/channel` capability and instructions
 - Connects via `StdioServerTransport`
-- Starts HTTP server on `127.0.0.1:{PORT}` with single route: `POST /webhook/github`
-- Spawns smee-client as child process when `SMEE_URL` is configured
+- Selects forge implementation based on `--forge` config
+- Starts HTTP server on port 0 (OS-assigned) with routes: `POST /webhook` and `POST /webhook/github`
+- Runs bootstrap (secret generation, smee provisioning, setup notification)
+- Starts smee-client in-process via Node.js API
 - Triggers delayed startup reconciliation (5s after MCP handshake)
-- Handles EADDRINUSE with clear error message
 
 ### Configuration (`lib/config.ts`)
 
-**Purpose**: Loads and validates settings.
+**Purpose**: Loads and validates settings from CLI args, env vars, and `.env` file.
 
 Sources (in priority order):
-1. Environment variables (`process.env`)
-2. File: `~/.claude/channels/ci/.env`
+1. CLI args (`process.argv` — `--forge`, `--repos`, `--port`, etc.)
+2. Environment variables (`process.env`)
+3. File: `~/.claude/channels/ci/.env`
 
-Validates `WEBHOOK_SECRET` is present (required). Parses `PORT` strictly via `Number()`. Splits comma-separated lists for `GITHUB_REPOS`, `WORKFLOW_FILTER`, `RECONCILE_BRANCHES`.
+Key config fields: `forge`, `webhookSecret` (nullable — auto-generated), `port` (default 0), `repos`, `smeeUrl`, `giteaUrl`, `giteaToken`.
+
+### Bootstrap (`lib/bootstrap.ts`)
+
+**Purpose**: First-run auto-provisioning with injectable deps for testability.
+
+Flow:
+1. Ensure webhook secret (generate if missing, write to `.env`)
+2. Provision smee.io channel (if `--smee-url` not provided)
+3. Start smee-client in-process
+4. Push setup notification via MCP channel
 
 ### Webhook Handler (`lib/handler.ts`)
 
-**Purpose**: Orchestrates the webhook processing pipeline.
+**Purpose**: Orchestrates the forge-agnostic webhook processing pipeline.
 
 Pipeline steps:
-1. Validate HMAC-SHA256 signature → 403 if invalid
-2. Check deduplication by delivery ID → 200 if duplicate
-3. Parse event → 400 if malformed JSON, 200 if irrelevant event
+1. Validate signature via `forge.validateSignature()` → 403 if invalid
+2. Parse event via `forge.parseWebhookEvent()` → 400 if malformed, 200 if irrelevant
+3. Check deduplication by delivery ID → 200 if duplicate
 4. Check repo allowlist → 200 drop if not listed
 5. Check workflow filter → 200 drop if not matching
-6. Format and push notification → immediately (never blocked by enrichment)
-7. Fire-and-forget: async job enrichment
+6. Format and push notification → immediately
+7. Fire-and-forget: async job enrichment via `forge.fetchFailedJobs()`
 8. Return 200
 
-### Webhook Parsing (`lib/webhook.ts`)
+### Webhook Types (`lib/webhook.ts`)
 
-**Purpose**: Signature validation, event parsing, deduplication, filtering.
+**Purpose**: Forge-agnostic types, deduplication, and filtering.
 
-Key functions:
-- `validateSignature()` — HMAC-SHA256 with timing-safe comparison
-- `parseWebhookEvent()` — Extracts `WebhookEvent` from payload, returns discriminated union (`event | irrelevant | malformed`)
+Exports:
+- `WebhookEvent` interface — common type produced by all forge parsers
+- `ParseResult` discriminated union — `event | irrelevant | malformed`
 - `isDuplicate()` — Bounded dedup set (100 entries, FIFO eviction)
 - `isRepoAllowed()` / `isWorkflowAllowed()` — Allowlist/filter checks
 
@@ -108,47 +144,37 @@ Key functions:
 
 **Purpose**: Formats and sanitizes channel notifications.
 
-Key functions:
-- `sanitize()` — Escapes HTML entities, strips control chars, truncates to max length
-- `formatNotification()` — Builds `{ content, meta }` from a `WebhookEvent`
-- `pushNotification()` — Calls `mcp.notification()` with `notifications/claude/channel` method
-
 ### Reconciliation (`lib/reconcile.ts`)
 
-**Purpose**: Catches missed failures and enriches notifications.
+**Purpose**: Generic startup reconciliation loop. Iterates branches, calls `forge.runReconciliation()` per branch, applies workflow filter, pushes notifications.
 
-Key functions:
-- `runStartupReconciliation()` — Checks configured branches via `gh run list`, pushes notifications for recent failures. 10s total budget.
-- `fetchFailedJobs()` — Calls `gh api` to get failed job names. 3s timeout. Best-effort, never blocks.
-
-All subprocess calls use `stdin: 'ignore'` to prevent consuming MCP stdin bytes.
+Also exports `runCommand()` — shared subprocess helper for CLI-based forges. All subprocess calls use `stdin: 'ignore'` to prevent consuming MCP stdin bytes.
 
 ## Data Flow
 
 ```
-GitHub Actions (workflow completes)
+Forge (GitHub/GitLab/Gitea)
         │
-        ▼
-   GitHub webhook POST
+    webhook POST
         │
         ▼
    smee.io (relay)
         │
         ▼
-   localhost:{PORT}/webhook/github
+   localhost:{port}/webhook
         │
         ▼
 ┌──────────────────────────────────────┐
 │        Webhook Handler Pipeline       │
 ├──────────────────────────────────────┤
-│ 1. Validate HMAC-SHA256 signature    │
-│ 2. Check dedup (X-GitHub-Delivery)   │
-│ 3. Parse JSON → WebhookEvent         │
+│ 1. forge.validateSignature()         │
+│ 2. forge.parseWebhookEvent()         │
+│ 3. Check dedup (delivery ID)         │
 │ 4. Check repo allowlist              │
 │ 5. Check workflow filter             │
 │ 6. Format notification               │
 │ 7. Push to MCP channel               │
-│ 8. Async: fetch failed job names     │
+│ 8. Async: forge.fetchFailedJobs()    │
 └──────────────────────────────────────┘
         │
         ▼
@@ -159,56 +185,36 @@ GitHub Actions (workflow completes)
 
 ```
 server.ts starts
-    ├── Load config (fail fast if WEBHOOK_SECRET missing)
+    ├── Load config (CLI args + env vars + .env)
+    ├── Select forge implementation
     ├── Create MCP Server with channel capability
     ├── Connect StdioServerTransport
-    ├── Create webhook handler
-    ├── Start HTTP server on 127.0.0.1:{PORT}
-    ├── Spawn smee-client (if SMEE_URL configured)
-    └── setTimeout(5s) → runStartupReconciliation()
+    ├── Create webhook handler (with forge)
+    ├── Start HTTP server on port 0
+    └── listen callback:
+        ├── Bootstrap (ensure secret, provision smee, push notification)
+        ├── Start smee-client in-process
+        └── setTimeout(5s) → runStartupReconciliation()
 ```
-
-The 5-second delay ensures the MCP handshake completes before any notifications are sent. Writing to stdout before the initialize handshake corrupts the JSON-RPC stream.
-
-## External Dependencies
-
-| Dependency | Purpose | Required | Documentation |
-|------------|---------|----------|---------------|
-| GitHub Webhooks | Sends `workflow_run` events | Yes | [docs](https://docs.github.com/en/webhooks) |
-| smee.io | Relays webhooks to localhost | No (but recommended) | [smee.io](https://smee.io) |
-| gh CLI | Startup reconciliation + job enrichment | No (best-effort) | [cli.github.com](https://cli.github.com) |
-| @modelcontextprotocol/sdk | MCP protocol implementation | Yes | [npm](https://www.npmjs.com/package/@modelcontextprotocol/sdk) |
-
-## Configuration
-
-All configuration via `~/.claude/channels/ci/.env` or environment variables (env vars take precedence):
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `WEBHOOK_SECRET` | Yes | — | HMAC-SHA256 shared secret |
-| `PORT` | No | `8789` | HTTP server port |
-| `SMEE_URL` | No | — | smee.io channel URL |
-| `GITHUB_REPOS` | No | — | Comma-separated repo allowlist |
-| `WORKFLOW_FILTER` | No | — | Comma-separated workflow name filter |
-| `RECONCILE_BRANCHES` | No | `ci,develop` | Branches to check on startup |
 
 ## Security Model
 
-1. **HMAC-SHA256 signature validation** — Every webhook verified with timing-safe comparison. Invalid → 403.
+1. **Webhook signature validation** — Per-forge: HMAC-SHA256 (GitHub, Gitea) or token comparison (GitLab), all timing-safe.
 2. **Localhost-only binding** — HTTP server on `127.0.0.1` only.
-3. **Repository allowlist** — Defense-in-depth on top of HMAC.
-4. **Input sanitization** — All user-controlled fields (commit messages, branch names, author names) escaped and truncated before inclusion in notifications.
-5. **Deduplication** — Bounded 100-entry set prevents replay from GitHub retry logic.
+3. **Repository allowlist** — Defense-in-depth on top of signature validation.
+4. **Input sanitization** — All user-controlled fields escaped and truncated before inclusion in notifications.
+5. **Deduplication** — Bounded 100-entry set prevents replay.
 6. **Subprocess isolation** — All child processes use `stdin: 'ignore'` to prevent MCP stdio corruption.
 
 ## Conventions
 
 - **No build step**: TypeScript runs directly via `tsx`
-- **Fail fast**: Missing required config throws immediately, no fallbacks
+- **Forge strategy pattern**: All forge-specific behavior in `lib/forges/`
+- **Auto-provisioning**: Secret and smee auto-generated on first run
 - **Async enrichment**: Never blocks the primary notification path
 - **Sanitize at the boundary**: All user-controlled input sanitized in `notify.ts` before reaching MCP
 - **Meta keys**: Underscore-separated only (no hyphens) per channels spec
 
 ---
 
-*Generated from codev review and source analysis. To update: run MAINTAIN or edit directly.*
+*Updated for Spec 1 (multi-forge support). To update: run MAINTAIN or edit directly.*
