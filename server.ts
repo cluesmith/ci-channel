@@ -9,7 +9,8 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { loadConfig, type Config } from "./lib/config.js";
 import { createWebhookHandler } from "./lib/handler.js";
 import { runStartupReconciliation } from "./lib/reconcile.js";
-import { bootstrap, fetchSmeeChannel, ensureSecretReal, persistSmeeUrlReal } from "./lib/bootstrap.js";
+import { bootstrap, fetchSmeeChannel, ensureSecretReal } from "./lib/bootstrap.js";
+import { saveState } from "./lib/state.js";
 import { pushNotification } from "./lib/notify.js";
 import { githubForge } from "./lib/forges/github.js";
 import { gitlabForge } from "./lib/forges/gitlab.js";
@@ -139,7 +140,7 @@ httpServer.listen(initialConfig.port, "127.0.0.1", () => {
       const result = await bootstrap(initialConfig, localTarget, {
         ensureSecret: ensureSecretReal,
         fetchSmeeChannel,
-        persistSmeeUrl: persistSmeeUrlReal,
+        persistState: saveState,
         startSmeeClient(source: string, target: string) {
           import("smee-client").then((mod) => {
             const SmeeClient = mod.default;

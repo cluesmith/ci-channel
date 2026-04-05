@@ -31,6 +31,7 @@ ci-channel/
 │   │   └── gitea.ts           # Gitea Actions forge implementation
 │   ├── config.ts              # Configuration loading (CLI args + env vars + .env)
 │   ├── bootstrap.ts           # First-run auto-provisioning (secret, smee, notification)
+│   ├── state.ts               # Plugin state persistence (state.json read/write)
 │   ├── exec.ts                # Subprocess runner (shared by CLI-based forges)
 │   ├── handler.ts             # Webhook handler pipeline (orchestrates the flow)
 │   ├── webhook.ts             # WebhookEvent interface, dedup, filtering (forge-agnostic)
@@ -103,22 +104,25 @@ Responsibilities:
 Sources (in priority order):
 1. CLI args (`process.argv` — `--forge`, `--repos`, `--port`, etc.)
 2. Environment variables (`process.env`)
-3. File: `~/.claude/channels/ci/.env`
+3. File: `~/.claude/channels/ci/.env` (user-supplied secrets only)
+4. File: `~/.claude/channels/ci/state.json` (auto-provisioned state — lowest priority)
 
 Key config fields: `forge`, `webhookSecret` (nullable — auto-generated), `port` (default 0), `repos`, `smeeUrl`, `giteaUrl`, `giteaToken`.
+
+The `.env` file is only ever touched by the user. `state.json` is only ever touched by the plugin.
 
 ### Bootstrap (`lib/bootstrap.ts`)
 
 **Purpose**: First-run auto-provisioning with injectable deps for testability.
 
 Flow:
-1. Ensure webhook secret (generate if missing, write to `.env`)
+1. Ensure webhook secret (generate if missing, check `state.json`)
 2. Provision smee.io channel (if `--smee-url` not provided, 5s timeout)
-3. Persist smee URL to `.env` (survives restarts)
+3. Persist auto-provisioned state to `state.json` (survives restarts)
 4. Start smee-client in-process
 5. Push setup notification via MCP channel
 
-All bootstrap side effects are injectable via `BootstrapDeps` interface for testability.
+Auto-provisioned state (generated secret, smee URL) is persisted to `~/.claude/channels/ci/state.json`, not `.env`. The `.env` file is reserved for user-supplied secrets. All bootstrap side effects are injectable via `BootstrapDeps` interface for testability.
 
 ### Webhook Handler (`lib/handler.ts`)
 

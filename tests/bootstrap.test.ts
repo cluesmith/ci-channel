@@ -2,6 +2,7 @@ import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { bootstrap, type BootstrapDeps } from '../lib/bootstrap.js'
 import type { Config } from '../lib/config.js'
+import type { PluginState } from '../lib/state.js'
 
 function makeConfig(overrides: Partial<Config> = {}): Config {
   return {
@@ -21,21 +22,21 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
 function makeDeps(overrides: Partial<BootstrapDeps> = {}): BootstrapDeps & {
   notifications: Array<{ content: string; meta: Record<string, string> }>
   smeeClients: Array<{ source: string; target: string }>
-  persistedSmeeUrls: string[]
+  savedStates: PluginState[]
 } {
   const notifications: Array<{ content: string; meta: Record<string, string> }> = []
   const smeeClients: Array<{ source: string; target: string }> = []
-  const persistedSmeeUrls: string[] = []
+  const savedStates: PluginState[] = []
   return {
     notifications,
     smeeClients,
-    persistedSmeeUrls,
+    savedStates,
     ensureSecret: (existing) => {
       if (existing) return { secret: existing, generated: false }
       return { secret: 'generated-secret-abc123', generated: true }
     },
     fetchSmeeChannel: async () => 'https://smee.io/test-channel',
-    persistSmeeUrl: (url) => { persistedSmeeUrls.push(url) },
+    persistState: (state) => { savedStates.push(state) },
     startSmeeClient: (source, target) => { smeeClients.push({ source, target }) },
     pushNotification: async (content, meta) => { notifications.push({ content, meta }) },
     ...overrides,
@@ -79,7 +80,6 @@ describe('bootstrap', () => {
     )
 
     assert.strictEqual(result.smeeUrl, 'https://smee.io/existing')
-    // smeeProvisioned is false — only secretGenerated might be true
   })
 
   test('starts smee client with correct source and target', async () => {
@@ -121,7 +121,7 @@ describe('bootstrap', () => {
 
     assert.strictEqual(result.smeeUrl, null)
     assert.strictEqual(result.wasProvisioned, true) // secret was still generated
-    assert.strictEqual(deps.smeeClients.length, 0) // no client started
+    assert.strictEqual(deps.smeeClients.length, 0)
   })
 
   test('handles smee client crash gracefully', async () => {
@@ -130,7 +130,6 @@ describe('bootstrap', () => {
     })
     const result = await bootstrap(makeConfig(), 'http://127.0.0.1:1234/webhook', deps)
 
-    // Should not throw — continues without relay
     assert.strictEqual(result.smeeUrl, 'https://smee.io/test-channel')
     assert.strictEqual(result.wasProvisioned, true)
   })
@@ -140,42 +139,49 @@ describe('bootstrap', () => {
       pushNotification: async () => { throw new Error('MCP push failed') },
     })
 
-    // Should not throw
     const result = await bootstrap(makeConfig(), 'http://127.0.0.1:1234/webhook', deps)
     assert.strictEqual(result.wasProvisioned, true)
   })
 
-  test('persists auto-provisioned smee URL', async () => {
+  test('persists state with secret and smee URL to state.json', async () => {
     const deps = makeDeps()
     await bootstrap(makeConfig(), 'http://127.0.0.1:1234/webhook', deps)
 
-    assert.strictEqual(deps.persistedSmeeUrls.length, 1)
-    assert.strictEqual(deps.persistedSmeeUrls[0], 'https://smee.io/test-channel')
+    assert.strictEqual(deps.savedStates.length, 1)
+    assert.strictEqual(deps.savedStates[0].webhookSecret, 'generated-secret-abc123')
+    assert.strictEqual(deps.savedStates[0].smeeUrl, 'https://smee.io/test-channel')
   })
 
-  test('does not persist smee URL when provided via config', async () => {
+  test('does not persist state when nothing provisioned', async () => {
     const deps = makeDeps()
     await bootstrap(
-      makeConfig({ smeeUrl: 'https://smee.io/existing' }),
+      makeConfig({ webhookSecret: 'existing', smeeUrl: 'https://smee.io/existing' }),
       'http://127.0.0.1:1234/webhook',
       deps,
     )
 
-    assert.strictEqual(deps.persistedSmeeUrls.length, 0)
+    assert.strictEqual(deps.savedStates.length, 0)
+  })
+
+  test('persists only secret when smee fails', async () => {
+    const deps = makeDeps({ fetchSmeeChannel: async () => null })
+    await bootstrap(makeConfig(), 'http://127.0.0.1:1234/webhook', deps)
+
+    assert.strictEqual(deps.savedStates.length, 1)
+    assert.strictEqual(deps.savedStates[0].webhookSecret, 'generated-secret-abc123')
+    assert.strictEqual(deps.savedStates[0].smeeUrl, undefined)
   })
 
   test('idempotent: existing secret returned when ensureSecret finds one', async () => {
     const deps = makeDeps({
       ensureSecret: (existing) => {
-        // Simulate: secret not passed in config but found on disk
-        if (!existing) return { secret: 'found-on-disk', generated: false }
+        if (!existing) return { secret: 'found-in-state', generated: false }
         return { secret: existing, generated: false }
       },
     })
     const result = await bootstrap(makeConfig(), 'http://127.0.0.1:1234/webhook', deps)
 
-    assert.strictEqual(result.webhookSecret, 'found-on-disk')
-    // wasProvisioned = smeeProvisioned only (secretGenerated is false)
+    assert.strictEqual(result.webhookSecret, 'found-in-state')
     assert.strictEqual(result.wasProvisioned, true) // smee was still auto-provisioned
   })
 })

@@ -65,8 +65,8 @@ claude
 ```
 
 On first run, the plugin:
-1. Generates a `WEBHOOK_SECRET` and saves it to `~/.claude/channels/ci/.env`
-2. Provisions a smee.io relay channel
+1. Generates a `WEBHOOK_SECRET` and provisions a smee.io relay channel
+2. Saves auto-provisioned state to `~/.claude/channels/ci/state.json` (persists across restarts)
 3. Sends a channel notification to Claude with the webhook URL and secret:
 
 ```
@@ -193,7 +193,9 @@ GITEA_TOKEN=your-gitea-api-token
 
 ## Configuration Reference
 
-Configuration uses CLI args in `.mcp.json` for structural settings, and `~/.claude/channels/ci/.env` for secrets. Precedence: CLI args > env vars > `.env` file.
+Configuration uses CLI args in `.mcp.json` for structural settings, and `~/.claude/channels/ci/.env` for secrets. Auto-provisioned state (generated secret, smee URL) is persisted to `~/.claude/channels/ci/state.json`.
+
+Precedence: CLI args > env vars > `.env` file > `state.json`.
 
 ### CLI args (structural config)
 

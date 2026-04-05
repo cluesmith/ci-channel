@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
+import { loadState } from './state.js'
 
 export const VALID_FORGES = ['github', 'gitlab', 'gitea'] as const
 export type ForgeName = (typeof VALID_FORGES)[number]
@@ -81,15 +82,21 @@ function parseCliArgs(argv: string[]): Record<string, string> {
   return args
 }
 
-export function loadConfig(envFilePath?: string, argv?: string[]): Config {
+export function loadConfig(envFilePath?: string, argv?: string[], statePath?: string): Config {
   const envPath = envFilePath ?? DEFAULT_ENV_PATH
   const fileEnv = parseEnvFile(envPath)
   const cliArgs = parseCliArgs(argv ?? process.argv.slice(2))
 
-  // Precedence: CLI args > env vars > .env file
-  const get = (key: string, cliFlag?: string): string | undefined => {
+  // Load persisted state (auto-provisioned values) as lowest priority
+  const state = loadState(statePath)
+
+  // Precedence: CLI args > env vars > .env file > state.json
+  const get = (key: string, cliFlag?: string, stateKey?: string): string | undefined => {
     if (cliFlag && cliArgs[cliFlag] !== undefined) return cliArgs[cliFlag]
-    return process.env[key] ?? fileEnv[key]
+    const envVal = process.env[key] ?? fileEnv[key]
+    if (envVal !== undefined) return envVal
+    if (stateKey && state[stateKey as keyof typeof state]) return state[stateKey as keyof typeof state]
+    return undefined
   }
 
   // Forge selection
@@ -101,8 +108,8 @@ export function loadConfig(envFilePath?: string, argv?: string[]): Config {
   }
   const forge = forgeStr as ForgeName
 
-  // Webhook secret — no longer fail-fast; null means auto-generate in bootstrap
-  const webhookSecret = get('WEBHOOK_SECRET') ?? null
+  // Webhook secret — null means auto-generate in bootstrap
+  const webhookSecret = get('WEBHOOK_SECRET', undefined, 'webhookSecret') ?? null
 
   // Port — default 0 (OS-assigned)
   const portStr = get('PORT', '--port')
@@ -116,6 +123,9 @@ export function loadConfig(envFilePath?: string, argv?: string[]): Config {
   const reposStr = reposFromCli ?? process.env.REPOS ?? fileEnv.REPOS ?? process.env.GITHUB_REPOS ?? fileEnv.GITHUB_REPOS
   const repos = splitCommaList(reposStr)
 
+  // Smee URL — CLI > env > .env > state.json
+  const smeeUrl = get('SMEE_URL', '--smee-url', 'smeeUrl') ?? null
+
   const reconcileBranchesStr = get('RECONCILE_BRANCHES', '--reconcile-branches')
   const reconcileBranches = reconcileBranchesStr
     ? reconcileBranchesStr.split(',').map(s => s.trim()).filter(Boolean)
@@ -125,7 +135,7 @@ export function loadConfig(envFilePath?: string, argv?: string[]): Config {
     forge,
     webhookSecret,
     port,
-    smeeUrl: get('SMEE_URL', '--smee-url') ?? null,
+    smeeUrl,
     repos,
     workflowFilter: splitCommaList(get('WORKFLOW_FILTER', '--workflow-filter')),
     reconcileBranches,

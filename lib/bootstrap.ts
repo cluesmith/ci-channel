@@ -1,8 +1,6 @@
 import { randomBytes } from 'node:crypto'
-import { mkdirSync, readFileSync, appendFileSync, existsSync } from 'node:fs'
-import { dirname } from 'node:path'
 import type { Config } from './config.js'
-import { DEFAULT_ENV_PATH } from './config.js'
+import { loadState, saveState, type PluginState } from './state.js'
 
 export interface BootstrapResult {
   webhookSecret: string
@@ -13,7 +11,7 @@ export interface BootstrapResult {
 export interface BootstrapDeps {
   ensureSecret(existing: string | null): { secret: string; generated: boolean }
   fetchSmeeChannel(): Promise<string | null>
-  persistSmeeUrl(url: string): void
+  persistState(state: PluginState): void
   startSmeeClient(source: string, target: string): void
   pushNotification(content: string, meta: Record<string, string>): Promise<void>
 }
@@ -23,29 +21,13 @@ export function ensureSecretReal(existing: string | null): { secret: string; gen
     return { secret: existing, generated: false }
   }
 
-  const secret = randomBytes(32).toString('hex')
-
-  try {
-    const envPath = DEFAULT_ENV_PATH
-    const dir = dirname(envPath)
-    mkdirSync(dir, { recursive: true })
-
-    // Check if file exists and already has WEBHOOK_SECRET
-    if (existsSync(envPath)) {
-      const content = readFileSync(envPath, 'utf-8')
-      if (content.includes('WEBHOOK_SECRET=')) {
-        const match = content.match(/^WEBHOOK_SECRET=(.+)$/m)
-        if (match) return { secret: match[1].trim(), generated: false }
-      }
-    }
-
-    appendFileSync(envPath, `WEBHOOK_SECRET=${secret}\n`)
-    console.error(`[ci-channel] Generated webhook secret and saved to ${envPath}`)
-  } catch (err) {
-    console.error(`[ci-channel] Warning: could not write secret to ${DEFAULT_ENV_PATH}: ${err}`)
+  // Check state.json for a previously generated secret
+  const state = loadState()
+  if (state.webhookSecret) {
+    return { secret: state.webhookSecret, generated: false }
   }
 
-  return { secret, generated: true }
+  return { secret: randomBytes(32).toString('hex'), generated: true }
 }
 
 export async function bootstrap(
@@ -63,15 +45,24 @@ export async function bootstrap(
     smeeUrl = await deps.fetchSmeeChannel()
     if (smeeUrl) {
       smeeProvisioned = true
-      // Persist to .env so the same URL survives restarts
-      deps.persistSmeeUrl(smeeUrl)
     } else {
       console.error('[ci-channel] Warning: could not provision smee channel — webhook relay not available')
     }
   }
 
-  // Step 3: Start smee client (note: actual relay startup may be async in production;
-  // bootstrap reports intent, not completion — relay starting a few ms late is harmless)
+  // Step 3: Persist auto-provisioned state to state.json
+  if (secretGenerated || smeeProvisioned) {
+    const stateToSave: PluginState = {}
+    if (secretGenerated) stateToSave.webhookSecret = secret
+    if (smeeProvisioned && smeeUrl) stateToSave.smeeUrl = smeeUrl
+
+    // Merge with existing state
+    const existing = loadState()
+    deps.persistState({ ...existing, ...stateToSave })
+    console.error('[ci-channel] Saved auto-provisioned state to state.json')
+  }
+
+  // Step 4: Start smee client
   if (smeeUrl) {
     try {
       deps.startSmeeClient(smeeUrl, localTarget)
@@ -81,7 +72,7 @@ export async function bootstrap(
     }
   }
 
-  // Step 4: Push setup notification if anything was auto-provisioned
+  // Step 5: Push setup notification if anything was auto-provisioned
   const wasProvisioned = secretGenerated || smeeProvisioned
   if (wasProvisioned) {
     const lines = ['CI channel ready. Configure your forge webhook:']
@@ -122,23 +113,5 @@ export async function fetchSmeeChannel(): Promise<string | null> {
       console.error(`[ci-channel] Warning: could not reach smee.io: ${err}`)
     }
     return null
-  }
-}
-
-export function persistSmeeUrlReal(url: string): void {
-  try {
-    const envPath = DEFAULT_ENV_PATH
-    const dir = dirname(envPath)
-    mkdirSync(dir, { recursive: true })
-
-    if (existsSync(envPath)) {
-      const content = readFileSync(envPath, 'utf-8')
-      if (content.includes('SMEE_URL=')) return // already persisted
-    }
-
-    appendFileSync(envPath, `SMEE_URL=${url}\n`)
-    console.error(`[ci-channel] Persisted smee URL to ${envPath}`)
-  } catch (err) {
-    console.error(`[ci-channel] Warning: could not persist smee URL: ${err}`)
   }
 }
