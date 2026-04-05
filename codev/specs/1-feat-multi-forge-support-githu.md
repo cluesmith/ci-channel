@@ -67,14 +67,25 @@ Example `.mcp.json` for GitLab:
 }
 ```
 
-**Port assignment**: The HTTP server defaults to port 0 (OS-assigned random port), so multiple Claude Code sessions can coexist without `EADDRINUSE` conflicts. The `--port` CLI arg is an optional override only. The startup flow changes:
-1. HTTP server starts on port 0 (or `--port` if specified)
-2. OS assigns an available port
-3. Read actual port from `httpServer.address().port`
-4. Spawn smee-client targeting `http://127.0.0.1:{actual_port}/webhook` (using the real port)
-5. Start reconciliation after 5-second delay
+**Port assignment**: The HTTP server defaults to port 0 (OS-assigned random port), so multiple Claude Code sessions can coexist without `EADDRINUSE` conflicts. The `--port` CLI arg is an optional override only.
 
-This means smee-client must be spawned AFTER the HTTP server starts listening, not at module top-level. The smee.io channel URL (public relay) is unchanged — only the local target port is dynamic.
+**smee-client integration**: Use smee-client's Node.js API (`new SmeeClient({source, target})`) in-process instead of spawning a subprocess. This eliminates child process management and stdio isolation concerns for smee. Add `smee-client` as a `package.json` dependency (currently spawned via npx).
+
+**Auto-provision smee channels**: When `--smee-url` is not provided, the plugin auto-provisions a smee.io channel on startup:
+1. HTTP server starts on port 0 (or `--port` if specified)
+2. OS assigns an available port; read from `httpServer.address().port`
+3. `fetch('https://smee.io/new', {redirect:'manual'})` — extract channel URL from `Location` header
+4. Start smee-client in-process: `new SmeeClient({source: channelUrl, target: 'http://127.0.0.1:{port}/webhook'})`
+5. Log the channel URL to stderr: `[ci-channel] Webhook relay URL: https://smee.io/abc123 — add this to your forge's webhook settings`
+6. Start reconciliation after 5-second delay
+
+If `--smee-url` IS provided, use that URL directly (for stable/persistent channels) — skip auto-provisioning.
+
+This means the setup process becomes:
+1. `npm install` in ci-channel directory
+2. Add MCP server to `.mcp.json` with `--forge` and configure `WEBHOOK_SECRET` in `.env`
+3. Start Claude Code — plugin logs the webhook relay URL
+4. Paste that URL into forge webhook settings (the only manual step)
 
 **Timing clarification**: The server delays 5 seconds after MCP handshake before starting reconciliation (`setTimeout` in `server.ts`). Reconciliation itself has a 10-second total execution budget (`totalBudgetMs` in `reconcile.ts`). Both values are preserved.
 
@@ -92,10 +103,12 @@ This means smee-client must be spawned AFTER the HTTP server starts listening, n
 - [ ] Invalid `--forge` value causes a clear error at startup (fail fast)
 - [ ] Structural config works via CLI args (`--forge`, `--repos`, `--workflow-filter`, `--reconcile-branches`)
 - [ ] Default port 0 allows multiple concurrent sessions without `EADDRINUSE`
-- [ ] smee-client spawned after HTTP server starts, using actual assigned port
+- [ ] smee-client runs in-process via Node.js API (not subprocess)
+- [ ] Auto-provisions smee channel when `--smee-url` not provided; logs relay URL to stderr
+- [ ] Explicit `--smee-url` uses that URL directly (stable/persistent channels)
 - [ ] Backward compatibility: existing env-var-only configs (including `GITHUB_REPOS`) continue to work
 - [ ] Test coverage for all three forges (unit + integration)
-- [ ] Documentation updated (README, arch.md, CLAUDE.md)
+- [ ] Documentation updated (README with per-forge setup guides, arch.md, CLAUDE.md)
 
 ## Constraints
 
@@ -116,6 +129,7 @@ This means smee-client must be spawned AFTER the HTTP server starts listening, n
 - Gitea forge uses direct HTTP API calls via Node's built-in `fetch` to `--gitea-url`. The `tea` CLI is not used (limited CI support). `GITEA_TOKEN` env var provides optional authentication.
 - Each deployment targets a single forge (no mixed-forge mode)
 - smee.io relay works for all three forges — it proxies raw HTTP POSTs and preserves all headers (signature, event type, delivery ID). This is how smee works by design.
+- smee.io is reachable on startup for auto-provisioning (if not, log warning and continue without relay — user must configure `--smee-url` manually or use another proxy)
 
 ## Solution Approaches
 
@@ -245,6 +259,9 @@ The reconciliation and enrichment methods receive the full `Config` object so th
 15. **Route**: Both `/webhook` and `/webhook/github` accepted
 16. **Backward compat**: No `FORGE` env var → defaults to `github`, all existing behavior preserved
 17. **Reconciliation**: CLI missing (gh/glab not installed) → skipped with warning, startup continues
+18. **smee**: Auto-provision when `--smee-url` not set → logs channel URL to stderr
+19. **smee**: Explicit `--smee-url` → uses that URL directly, no auto-provision
+20. **smee**: smee.io unreachable → logs warning, continues without relay
 
 ### Non-Functional Tests
 1. **Performance**: Webhook handling latency unchanged with forge abstraction layer
@@ -256,7 +273,8 @@ Test fixtures for GitLab and Gitea must be based on documented webhook payload s
 ## Dependencies
 - **External CLIs**: `gh` (GitHub), `glab` (GitLab) — optional, best-effort for reconciliation/enrichment
 - **Gitea**: Uses Node.js built-in `fetch` against `--gitea-url` API (no external CLI needed)
-- **No new npm dependencies**: Forge implementations use Node.js built-ins (`crypto`, `child_process`, `fetch`)
+- **smee-client**: Added as `package.json` dependency (was previously spawned via `npx`). Used via Node.js API in-process.
+- **No other new npm dependencies**: Forge implementations use Node.js built-ins (`crypto`, `child_process`, `fetch`)
 
 ## Risks and Mitigation
 | Risk | Probability | Impact | Mitigation Strategy |
@@ -280,7 +298,7 @@ Configuration is split between CLI args (structural) and env vars/`.env` (secret
 | `--reconcile-branches` | `ci,develop` | Branches to check on startup |
 | `--port` | `0` (OS-assigned) | HTTP server port (0 = random available port) |
 | `--gitea-url` | — | Gitea instance base URL (required for Gitea reconciliation/enrichment) |
-| `--smee-url` | — | smee.io channel URL |
+| `--smee-url` | — | smee.io channel URL (if omitted, auto-provisions a new channel) |
 
 ### Env vars / `.env` (secrets only)
 
@@ -331,6 +349,25 @@ All forges produce the same `WebhookEvent` interface. Field sources per forge:
 
 All fields marked as `string | null` in the interface remain nullable — forge parsers use `?? null` for missing optional fields (commitMessage, commitAuthor).
 
+## Documentation Requirements
+
+The README must include **per-forge setup guides** with forge-specific webhook configuration steps:
+
+- **GitHub**: Settings > Webhooks — content type, secret, events to subscribe, webhook URL
+- **GitLab**: Settings > Webhooks — URL, secret token, Pipeline events trigger
+- **Gitea**: Settings > Webhooks — URL, secret, workflow_run event
+
+Each guide should include:
+1. `.mcp.json` configuration example for that forge
+2. `.env` file contents (WEBHOOK_SECRET, forge-specific secrets)
+3. Forge-specific webhook configuration steps (with screenshots or links to forge docs)
+4. Which webhook events to enable
+
+Also document:
+- Auto-provisioned smee channels (the default — no `--smee-url` needed)
+- Manual smee channel creation (`npx smee-client --new`) for persistent channels
+- The simplified setup flow (npm install → add to .mcp.json → start Claude → paste webhook URL)
+
 ## References
 - **Spec 0**: `codev/specs/0-ci-channel-plugin.md` — the original CI channel plugin spec. Defines the `WebhookEvent` interface, webhook handler pipeline, notification format, and reconciliation pattern that this spec extends.
 - **Codev forge abstraction**: `packages/codev/src/lib/forge.ts` in the codev project — reference implementation for the strategy pattern approach.
@@ -371,5 +408,9 @@ The `WebhookEvent` interface (Spec 0) and `notify.ts` module are already forge-a
 - Added CLI arg parsing specification (`process.argv` iteration)
 - Backward-compatible env var fallbacks documented with precedence rules
 - Default port changed from 8789 to 0 (OS-assigned random port) for multi-session coexistence
-- smee-client must spawn AFTER HTTP server starts, using actual assigned port
-- Eliminates EADDRINUSE failure mode when multiple Claude sessions run concurrently
+- smee-client runs in-process via Node.js API instead of subprocess spawn
+- Auto-provisions smee channel when `--smee-url` not provided; logs relay URL
+- smee-client added as package.json dependency
+- Eliminates EADDRINUSE failure mode when multiple sessions run concurrently
+- README must include per-forge setup guides (GitHub, GitLab, Gitea webhook config steps)
+- Document `npx smee-client --new` for manual persistent channel creation
