@@ -71,21 +71,37 @@ Example `.mcp.json` for GitLab:
 
 **smee-client integration**: Use smee-client's Node.js API (`new SmeeClient({source, target})`) in-process instead of spawning a subprocess. This eliminates child process management and stdio isolation concerns for smee. Add `smee-client` as a `package.json` dependency (currently spawned via npx).
 
-**Auto-provision smee channels**: When `--smee-url` is not provided, the plugin auto-provisions a smee.io channel on startup:
-1. HTTP server starts on port 0 (or `--port` if specified)
-2. OS assigns an available port; read from `httpServer.address().port`
-3. `fetch('https://smee.io/new', {redirect:'manual'})` — extract channel URL from `Location` header
-4. Start smee-client in-process: `new SmeeClient({source: channelUrl, target: 'http://127.0.0.1:{port}/webhook'})`
-5. Log the channel URL to stderr: `[ci-channel] Webhook relay URL: https://smee.io/abc123 — add this to your forge's webhook settings`
-6. Start reconciliation after 5-second delay
+**First-run auto-provisioning**: On startup, the plugin auto-generates missing configuration:
 
-If `--smee-url` IS provided, use that URL directly (for stable/persistent channels) — skip auto-provisioning.
+1. **Webhook secret**: If `WEBHOOK_SECRET` is not set (env var or `.env` file):
+   - Generate: `crypto.randomBytes(32).toString('hex')`
+   - Write to `~/.claude/channels/ci/.env` (create file/directory if needed)
+   - If `WEBHOOK_SECRET` already exists in `.env` or env vars, skip generation
 
-This means the setup process becomes:
-1. `npm install` in ci-channel directory
-2. Add MCP server to `.mcp.json` with `--forge` and configure `WEBHOOK_SECRET` in `.env`
-3. Start Claude Code — plugin logs the webhook relay URL
-4. Paste that URL into forge webhook settings (the only manual step)
+2. **smee channel**: If `--smee-url` is not provided:
+   - `fetch('https://smee.io/new', {redirect:'manual'})` → extract channel URL from `Location` header
+   - If smee.io unreachable → log warning, continue without relay
+   - If `--smee-url` IS provided, use that URL directly (for stable/persistent channels)
+
+3. **HTTP server**: Starts on port 0 (or `--port` if specified). Read actual port from `httpServer.address().port`.
+
+4. **smee-client**: Start in-process via Node.js API: `new SmeeClient({source: channelUrl, target: 'http://127.0.0.1:{port}/webhook'})`
+
+5. **Setup notification**: Push a **channel notification** via `mcp.notification()` with setup instructions:
+   ```
+   CI channel ready. Configure your forge webhook:
+     URL: https://smee.io/abc123
+     Secret: a1b2c3d4...
+     Events: Workflow runs (GitHub/Gitea) or Pipeline events (GitLab)
+   ```
+   Claude sees this directly and can relay it to the user. Also log to stderr as backup.
+
+6. Start reconciliation after 5-second delay.
+
+This means the full zero-config setup is:
+1. Add MCP server to `.mcp.json` (just `--forge` if not GitHub)
+2. Start Claude Code — plugin generates secret, provisions smee, sends notification
+3. User pastes URL + secret into forge webhook settings (the only manual step)
 
 **Timing clarification**: The server delays 5 seconds after MCP handshake before starting reconciliation (`setTimeout` in `server.ts`). Reconciliation itself has a 10-second total execution budget (`totalBudgetMs` in `reconcile.ts`). Both values are preserved.
 
@@ -104,11 +120,14 @@ This means the setup process becomes:
 - [ ] Structural config works via CLI args (`--forge`, `--repos`, `--workflow-filter`, `--reconcile-branches`)
 - [ ] Default port 0 allows multiple concurrent sessions without `EADDRINUSE`
 - [ ] smee-client runs in-process via Node.js API (not subprocess)
-- [ ] Auto-provisions smee channel when `--smee-url` not provided; logs relay URL to stderr
+- [ ] Auto-provisions smee channel when `--smee-url` not provided
 - [ ] Explicit `--smee-url` uses that URL directly (stable/persistent channels)
+- [ ] Auto-generates `WEBHOOK_SECRET` on first run, writes to `~/.claude/channels/ci/.env`
+- [ ] Pushes setup instructions (URL + secret) via channel notification to Claude
 - [ ] Backward compatibility: existing env-var-only configs (including `GITHUB_REPOS`) continue to work
 - [ ] Test coverage for all three forges (unit + integration)
 - [ ] Documentation updated (README with per-forge setup guides, arch.md, CLAUDE.md)
+- [ ] End-to-end validation: plugin configured on the ci-channel repo itself (cluesmith/ci-channel) — verify a real GitHub Actions failure triggers a channel notification. We are our own first user.
 
 ## Constraints
 
@@ -259,9 +278,13 @@ The reconciliation and enrichment methods receive the full `Config` object so th
 15. **Route**: Both `/webhook` and `/webhook/github` accepted
 16. **Backward compat**: No `FORGE` env var → defaults to `github`, all existing behavior preserved
 17. **Reconciliation**: CLI missing (gh/glab not installed) → skipped with warning, startup continues
-18. **smee**: Auto-provision when `--smee-url` not set → logs channel URL to stderr
+18. **smee**: Auto-provision when `--smee-url` not set → channel URL in notification
 19. **smee**: Explicit `--smee-url` → uses that URL directly, no auto-provision
 20. **smee**: smee.io unreachable → logs warning, continues without relay
+21. **Secret**: Auto-generate `WEBHOOK_SECRET` when not set → written to `~/.claude/channels/ci/.env`
+22. **Secret**: Existing `WEBHOOK_SECRET` → used as-is, no generation
+23. **Notification**: Setup instructions pushed via channel notification on first run
+24. **E2E**: Real GitHub Actions failure on cluesmith/ci-channel triggers notification
 
 ### Non-Functional Tests
 1. **Performance**: Webhook handling latency unchanged with forge abstraction layer
@@ -304,7 +327,7 @@ Configuration is split between CLI args (structural) and env vars/`.env` (secret
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `WEBHOOK_SECRET` | Yes | HMAC-SHA256 shared secret (or GitLab token) |
+| `WEBHOOK_SECRET` | No (auto-generated) | HMAC-SHA256 shared secret (or GitLab token). Auto-generated on first run if missing. |
 | `GITEA_TOKEN` | No | Gitea API token for authentication |
 
 ### Backward-compatible env vars
@@ -414,3 +437,6 @@ The `WebhookEvent` interface (Spec 0) and `notify.ts` module are already forge-a
 - Eliminates EADDRINUSE failure mode when multiple sessions run concurrently
 - README must include per-forge setup guides (GitHub, GitLab, Gitea webhook config steps)
 - Document `npx smee-client --new` for manual persistent channel creation
+- Auto-generate WEBHOOK_SECRET on first run, write to ~/.claude/channels/ci/.env
+- Push setup instructions (URL + secret) via channel notification, not just stderr
+- E2E validation: configure plugin on cluesmith/ci-channel repo itself
