@@ -83,57 +83,61 @@ export const giteaForge: Forge = {
       return null
     }
 
-    // Use repos config to determine which repo to check
     if (!config.repos || config.repos.length === 0) {
       return null
     }
 
-    const repo = config.repos[0] // Check the first configured repo
-    const url = `${config.giteaUrl}/api/v1/repos/${repo}/actions/runs?branch=${encodeURIComponent(branch)}&limit=1`
     const headers: Record<string, string> = {}
     if (config.giteaToken) {
       headers['Authorization'] = `token ${config.giteaToken}`
     }
 
-    try {
-      const controller = new AbortController()
-      const timer = setTimeout(() => controller.abort(), timeoutMs)
+    // Check all configured repos for failures on this branch
+    for (const repo of config.repos) {
+      const url = `${config.giteaUrl}/api/v1/repos/${repo}/actions/runs?branch=${encodeURIComponent(branch)}&limit=1`
 
-      const resp = await fetch(url, { headers, signal: controller.signal })
-      clearTimeout(timer)
+      try {
+        const controller = new AbortController()
+        const timer = setTimeout(() => controller.abort(), timeoutMs)
 
-      if (!resp.ok) {
-        console.error(`[ci-channel] Startup reconciliation: Gitea API returned ${resp.status} for branch "${branch}"`)
-        return null
+        const resp = await fetch(url, { headers, signal: controller.signal })
+        clearTimeout(timer)
+
+        if (!resp.ok) {
+          console.error(`[ci-channel] Startup reconciliation: Gitea API returned ${resp.status} for ${repo} branch "${branch}"`)
+          continue
+        }
+
+        const data = await resp.json() as any
+        const runs = Array.isArray(data) ? data : data?.workflow_runs
+        if (!Array.isArray(runs) || runs.length === 0) continue
+
+        const run = runs[0]
+        if (run.conclusion !== 'failure') continue
+
+        return {
+          deliveryId: `reconcile-${branch}-${run.id ?? 'unknown'}`,
+          workflowName: run.name ?? 'unknown',
+          conclusion: run.conclusion,
+          branch: run.head_branch ?? branch,
+          commitSha: run.head_sha ?? 'unknown',
+          commitMessage: null,
+          commitAuthor: null,
+          runUrl: run.html_url ?? '',
+          runId: run.id ?? 0,
+          repoFullName: repo,
+        }
+      } catch (err) {
+        if ((err as Error).name === 'AbortError') {
+          console.error(`[ci-channel] Startup reconciliation: Gitea API timed out for ${repo} branch "${branch}"`)
+        } else {
+          console.error(`[ci-channel] Startup reconciliation: Gitea API error for ${repo} branch "${branch}": ${err}`)
+        }
+        continue
       }
-
-      const data = await resp.json() as any
-      const runs = Array.isArray(data) ? data : data?.workflow_runs
-      if (!Array.isArray(runs) || runs.length === 0) return null
-
-      const run = runs[0]
-      if (run.conclusion !== 'failure') return null
-
-      return {
-        deliveryId: `reconcile-${branch}-${run.id ?? 'unknown'}`,
-        workflowName: run.name ?? 'unknown',
-        conclusion: run.conclusion,
-        branch: run.head_branch ?? branch,
-        commitSha: run.head_sha ?? 'unknown',
-        commitMessage: null,
-        commitAuthor: null,
-        runUrl: run.html_url ?? '',
-        runId: run.id ?? 0,
-        repoFullName: repo,
-      }
-    } catch (err) {
-      if ((err as Error).name === 'AbortError') {
-        console.error(`[ci-channel] Startup reconciliation: Gitea API timed out for branch "${branch}"`)
-      } else {
-        console.error(`[ci-channel] Startup reconciliation: Gitea API error for branch "${branch}": ${err}`)
-      }
-      return null
     }
+
+    return null
   },
 
   async fetchFailedJobs(config: Config, repoFullName: string, runId: number): Promise<string[] | null> {
