@@ -53,35 +53,53 @@ Implement multi-forge support using the Forge Strategy Pattern (Spec 1, Approach
 #### Deliverables
 - [ ] `lib/forge.ts` — Forge interface definition
 - [ ] `lib/forges/github.ts` — GitHubForge implementation (extracted from webhook.ts, reconcile.ts)
-- [ ] `lib/config.ts` — CLI arg parsing, `--forge`, `--repos`, `--port`, etc., backward-compat env vars
+- [ ] `lib/config.ts` — CLI arg parsing, all `--flag` args, backward-compat env vars
+- [ ] `lib/bootstrap.ts` — Auto-provisioning: secret generation, smee channel, .env writing, setup notification
 - [ ] `lib/handler.ts` — Refactored to use Forge interface instead of hardcoded GitHub headers
 - [ ] `lib/reconcile.ts` — Refactored: generic orchestration, forge-specific logic in GitHubForge
-- [ ] `server.ts` — Port 0 default, smee spawned after listen, `/webhook` + `/webhook/github` routes, forge selection
+- [ ] `server.ts` — Port 0 default, bootstrap after listen, `/webhook` + `/webhook/github` routes, forge selection
 - [ ] `lib/webhook.ts` — Retains `WebhookEvent` interface, dedup, and filter functions. GitHub-specific parsing/validation moves to GitHubForge.
-- [ ] Updated tests — existing tests adapted to work with new structure
+- [ ] Updated tests — existing tests adapted for new config shape (port default, `repos` field name)
 - [ ] `tests/config.test.ts` — New tests for CLI arg parsing and precedence
+- [ ] `tests/bootstrap.test.ts` — Tests for auto-provisioning with injected deps (no real filesystem/network)
 
 #### Implementation Details
 
 **Forge interface** (`lib/forge.ts`):
 ```typescript
+import type { ParseResult, WebhookEvent } from './webhook.js';  // reuse existing types from Spec 0
+import type { Config } from './config.js';
+
 export interface Forge {
   readonly name: string;
-  validateSignature(payload: string, headers: Headers, secret: string): boolean;
-  parseWebhookEvent(headers: Headers, body: string): ParseResult;
+  validateSignature(payload: string, headers: Headers, secret: string): boolean;  // Web API Headers
+  parseWebhookEvent(headers: Headers, body: string): ParseResult;  // existing ParseResult from webhook.ts
   runReconciliation(config: Config, branch: string, timeoutMs: number): Promise<WebhookEvent | null>;
   fetchFailedJobs(config: Config, repoFullName: string, runId: number): Promise<string[] | null>;
 }
 ```
 
+`ParseResult` is the existing discriminated union from `webhook.ts` (`type: "event" | "irrelevant" | "malformed"`). `Headers` is the Web API `Headers` class (already constructed in `server.ts` from Node's `IncomingMessage`).
+
 **CLI arg parsing** (`lib/config.ts`):
 - Parse `process.argv.slice(2)` by iterating `--flag value` pairs
 - Unknown flags → throw at startup (fail fast)
 - Precedence: CLI args > env vars > `.env` file
-- `--forge` defaults to `github`; validates against `github | gitlab | gitea`
-- `--repos` replaces `GITHUB_REPOS`/`REPOS` with full backward compat
-- `--port` defaults to `0` (was `8789`)
-- Config gains `forge: string` and `repos: string[] | null` fields (replaces `githubRepos`)
+- All supported flags:
+  - `--forge` (default `github`; validates against `github | gitlab | gitea`)
+  - `--repos` (comma-separated; replaces `GITHUB_REPOS`/`REPOS` with backward compat)
+  - `--port` (default `0`; was `8789`)
+  - `--workflow-filter` (comma-separated; replaces `WORKFLOW_FILTER`)
+  - `--reconcile-branches` (comma-separated; replaces `RECONCILE_BRANCHES`, default `ci,develop`)
+  - `--gitea-url` (Gitea instance base URL; replaces `GITEA_URL`)
+  - `--smee-url` (smee.io channel URL; replaces `SMEE_URL`)
+- Config type changes:
+  - `githubRepos` → `repos` (type unchanged: `string[] | null`)
+  - Add `forge: string` (`"github" | "gitlab" | "gitea"`)
+  - Add `giteaUrl: string | null`
+  - Add `giteaToken: string | null` (from `GITEA_TOKEN` env var only — secret, not a CLI arg)
+- **Remove fail-fast throw for missing `WEBHOOK_SECRET`** from `loadConfig()`. The secret is no longer required at config load time — it will be auto-generated in the bootstrap phase if missing. `loadConfig()` returns `webhookSecret: string | null`; the bootstrap module handles generation before any webhook processing starts.
+- Update port validation error message: "between 0 and 65535" (was "between 1 and 65535") since 0 is now a valid default.
 
 **Handler refactor** (`lib/handler.ts`):
 - `createWebhookHandler(config, mcp, forge)` — receives forge as parameter
@@ -89,23 +107,44 @@ export interface Forge {
 - Calls `forge.parseWebhookEvent()` instead of `parseWebhookEvent()` with GitHub headers
 - Repo allowlist uses `config.repos` instead of `config.githubRepos`
 
+**Bootstrap module** (`lib/bootstrap.ts`):
+
+New module that handles all first-run auto-provisioning. Extracted from `server.ts` for testability — each side effect (filesystem, network, MCP) is injectable.
+
+```typescript
+export interface BootstrapDeps {
+  readEnvFile(path: string): string | null;       // read existing .env
+  writeEnvFile(path: string, content: string): void;  // write/append .env
+  fetchSmeeChannel(): Promise<string | null>;     // GET smee.io/new
+  createSmeeClient(source: string, target: string): void;  // start relay
+  pushNotification(content: string, meta: Record<string, string>): Promise<void>;
+}
+
+export async function bootstrap(config: Config, deps: BootstrapDeps): Promise<{
+  webhookSecret: string;
+  smeeUrl: string | null;
+}>;
+```
+
+Flow:
+1. If `config.webhookSecret` is null → generate `crypto.randomBytes(32).toString('hex')`, call `deps.writeEnvFile()` to append `WEBHOOK_SECRET=...` to `~/.claude/channels/ci/.env` (create dir/file if needed via `mkdirSync` + append). Idempotent: checks if `WEBHOOK_SECRET=` line already exists before appending.
+2. If `config.smeeUrl` is null → call `deps.fetchSmeeChannel()` to auto-provision. On failure → return null (continue without relay).
+3. If smeeUrl available → call `deps.createSmeeClient(smeeUrl, target)` wrapped in try/catch for graceful degradation if SmeeClient crashes in-process.
+4. If any auto-provisioning happened → call `deps.pushNotification()` with setup instructions.
+5. Return resolved secret and smeeUrl.
+
 **Server changes** (`server.ts`):
 - Import forge implementations, select based on `config.forge`
 - Listen on port 0 by default
 - Both `POST /webhook` and `POST /webhook/github` hit the same handler
+- For `--forge github`, the smee relay target uses `/webhook/github` to preserve backward compatibility with existing webhook senders. For other forges, use `/webhook`.
 - Remove `EADDRINUSE` special handling (port 0 doesn't conflict)
-- smee-client runs in-process via Node.js API (`new SmeeClient({source, target})`)
-- Auto-provision smee channel when `--smee-url` not provided:
-  - `fetch('https://smee.io/new', {redirect:'manual'})` → extract `Location` header
-  - If smee.io unreachable → log warning, continue without relay
-- If `--smee-url` provided → use that URL directly
-- Auto-generate `WEBHOOK_SECRET` when not set:
-  - `crypto.randomBytes(32).toString('hex')`
-  - Write to `~/.claude/channels/ci/.env` (create dir/file if needed)
-  - If already exists → use as-is
-- Push setup notification via `mcp.notification()` with URL + secret + event type instructions
-- Also log setup info to stderr as backup
+- After `listen` callback fires:
+  1. Call `bootstrap(config, realDeps)` with real implementations
+  2. Start smee-client in-process via `new SmeeClient({source, target})` (through bootstrap deps)
+  3. Push setup notification if auto-provisioned
 - Add `smee-client` to `package.json` dependencies
+- SmeeClient instantiation wrapped in try/catch — runtime errors in smee don't crash the server
 
 **Reconciliation refactor** (`lib/reconcile.ts`):
 - `runStartupReconciliation(mcp, config, forge)` — generic loop over branches
@@ -114,7 +153,7 @@ export interface Forge {
 - `runCommand()` helper stays in reconcile.ts (shared utility for CLI-based forges)
 
 #### Acceptance Criteria
-- [ ] All 83 existing tests pass without modification to test assertions
+- [ ] All 83 existing tests pass (with expected assertion updates for intentional changes: port default 0, `config.repos` field name, `webhookSecret` nullable). Behavioral parity preserved — same webhook pipeline, same notifications.
 - [ ] `--forge github` produces identical behavior to no `--forge` arg
 - [ ] `--repos` CLI arg works; `GITHUB_REPOS` env var still works as fallback
 - [ ] `--port 0` assigns random port; smee uses actual port
@@ -122,17 +161,19 @@ export interface Forge {
 - [ ] Auto-provisions smee channel when `--smee-url` not set
 - [ ] Pushes setup instructions via channel notification
 - [ ] Both `/webhook` and `/webhook/github` routes work
+- [ ] For `--forge github`, smee relay targets `/webhook/github` (backward compat)
 - [ ] Invalid `--forge bitbucket` fails fast at startup
 - [ ] Unknown `--badarg` fails fast at startup
 - [ ] Config precedence: CLI args > env vars > .env
 
 #### Test Plan
-- **Unit Tests**: CLI arg parsing, config precedence, forge selection, port 0 behavior, secret auto-generation, smee auto-provision
+- **Unit Tests**: CLI arg parsing (all flags), config precedence, forge selection, port 0 behavior
+- **Unit Tests (bootstrap)**: Secret generation with injected deps, .env write (mocked fs), smee provisioning (mocked fetch), setup notification (mocked MCP), SmeeClient crash graceful degradation, idempotent .env append
 - **Integration Tests**: Full webhook pipeline through forge abstraction (GitHub forge)
-- **Regression**: All 83 existing tests pass
+- **Regression**: All 83 existing tests pass (with assertion updates for config shape changes documented above)
 
 #### Rollback Strategy
-Git revert the phase commit. No external state changes.
+Git revert the phase commit. **External state**: auto-generated `.env` file and smee channel are not reverted by git — manual cleanup may be needed. The `.env` write is idempotent (won't duplicate on re-run).
 
 ---
 
@@ -166,7 +207,7 @@ Git revert the phase commit. No external state changes.
 - Synthetic delivery ID: `gitlab-{project.id}-{object_attributes.id}-{object_attributes.status}`
 - Map fields per spec's WebhookEvent Field Mapping table
 - `runUrl` constructed from project web_url + `/-/pipelines/{id}`
-- `workflowName` from `object_attributes.name` or `"pipeline"` fallback
+- `workflowName` from `object_attributes.name` (pipeline name) or `"pipeline"` fallback. **Note**: spec's field mapping table says `detailed_status`, but that's a status string (e.g., "failed"), not a name. `object_attributes.name` is the correct field for pipeline name. This is an intentional deviation from the spec table — the spec table entry is inaccurate.
 
 **Reconciliation**:
 - `glab ci list --branch {b} --per-page 1 --output json`
@@ -194,7 +235,7 @@ Git revert the phase commit. No external state changes.
 - **Fixtures**: Based on GitLab Pipeline Hook documentation
 
 #### Rollback Strategy
-Delete `lib/forges/gitlab.ts` and test files. No other files affected.
+Delete `lib/forges/gitlab.ts` and test files. Also revert the forge registry entry (import/map in the module that maps `"gitlab"` → `GitLabForge`).
 
 ---
 
@@ -253,7 +294,7 @@ Delete `lib/forges/gitlab.ts` and test files. No other files affected.
 - **Fixtures**: Based on Gitea webhook documentation
 
 #### Rollback Strategy
-Delete `lib/forges/gitea.ts` and test files. No other files affected.
+Delete `lib/forges/gitea.ts` and test files. Also revert the forge registry entry.
 
 ---
 
@@ -306,6 +347,29 @@ Phases 2 and 3 are independent of each other (both depend only on Phase 1).
 | GitLab payload differs from docs | Medium | Medium | Use documented payload schema; degrade gracefully for optional fields |
 | Gitea API not available/different | Medium | Low | Best-effort; skip with warning if unavailable |
 | Port 0 breaks existing test infrastructure | Low | Medium | Tests can use explicit port override |
+| smee-client in-process crash propagates | Low | Medium | Wrap SmeeClient in try/catch; graceful degradation (relay stops, server continues) |
+| Auto-generated .env file write fails (permissions) | Low | Low | Log warning, continue without persisted secret (user must configure manually) |
+
+## Expert Review
+
+**Date**: 2026-04-05
+**Models Consulted**: Codex (GPT-5), Claude
+**Gemini**: Skipped (API key not configured)
+
+**Codex verdict**: REQUEST_CHANGES (HIGH confidence)
+**Claude verdict**: COMMENT (HIGH confidence)
+
+**Key feedback addressed**:
+- Removed impossible "no assertion changes" regression criterion; explicitly listed expected test updates (port default, field names)
+- Added `lib/bootstrap.ts` module with injectable deps for testable auto-provisioning
+- Fixed rollback strategy: acknowledged external state (`.env` file, smee channel)
+- Specified GitHub route backward compat in smee relay targeting
+- Enumerated all CLI args in Phase 1 config details (was missing `--workflow-filter`, `--reconcile-branches`, `--gitea-url`, `--smee-url`)
+- Clarified `ParseResult` and `Headers` types in Forge interface (reuse existing types)
+- Acknowledged GitLab `workflowName` field mapping deviation from spec (intentional: `name` > `detailed_status`)
+- Added smee-client crash isolation strategy (try/catch, graceful degradation)
+- Added bootstrap test plan with mocking strategy (injected deps, no real fs/network)
+- Documented `WEBHOOK_SECRET` fail-fast removal from `loadConfig()` and new bootstrap flow
 
 ## Validation Checkpoints
 1. **After Phase 1**: All 83 existing tests pass. `/webhook` and `/webhook/github` both work. Port 0 assigns correctly. CLI arg parsing works.

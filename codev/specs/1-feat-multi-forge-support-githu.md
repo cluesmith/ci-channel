@@ -387,9 +387,16 @@ Each guide should include:
 4. Which webhook events to enable
 
 Also document:
-- Auto-provisioned smee channels (the default — no `--smee-url` needed)
+- **Zero-config first-run flow**: auto-generated secret + auto-provisioned smee channel. User just adds MCP server to `.mcp.json`, starts Claude, and pastes the webhook URL.
+- **Configuration reference**: Complete table of CLI args with env var fallbacks and precedence rules
+- **Auto-provisioned smee channels** (the default — no `--smee-url` needed)
 - Manual smee channel creation (`npx smee-client --new`) for persistent channels
-- The simplified setup flow (npm install → add to .mcp.json → start Claude → paste webhook URL)
+
+The `arch.md` must be updated with:
+- Forge abstraction layer (new `lib/forge.ts` interface, `lib/forges/` directory)
+- Updated directory structure
+- Updated data flow diagrams showing forge selection
+- Bootstrap module documentation
 
 ## References
 - **Spec 0**: `codev/specs/0-ci-channel-plugin.md` — the original CI channel plugin spec. Defines the `WebhookEvent` interface, webhook handler pipeline, notification format, and reconciliation pattern that this spec extends.
