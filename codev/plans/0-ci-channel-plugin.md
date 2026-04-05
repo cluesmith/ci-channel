@@ -3,7 +3,7 @@
 ## Metadata
 - **ID**: plan-2026-04-02-ci-channel
 - **Status**: integrated
-- **Specification**: [codev/specs/1-ci-channel-plugin.md](../specs/1-ci-channel-plugin.md)
+- **Specification**: [codev/specs/0-ci-channel-plugin.md](../specs/0-ci-channel-plugin.md)
 - **Created**: 2026-04-02
 
 ## Executive Summary

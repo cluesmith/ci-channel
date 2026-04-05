@@ -51,9 +51,9 @@ This isn't a hard requirement — we won't reject a good PR because it lacks a s
 **SPIR** (Specify, Plan, Implement, Review) includes human approval gates on the spec and plan. **ASPIR** (Autonomous SPIR) auto-approves the spec and plan, keeping the same structure but moving faster. Choose whichever fits your workflow.
 
 To see how this looks in practice, check the existing project documents:
-- [`codev/specs/1-ci-channel-plugin.md`](codev/specs/1-ci-channel-plugin.md)
-- [`codev/plans/1-ci-channel-plugin.md`](codev/plans/1-ci-channel-plugin.md)
-- [`codev/reviews/1-ci-channel-plugin.md`](codev/reviews/1-ci-channel-plugin.md)
+- [`codev/specs/0-ci-channel-plugin.md`](codev/specs/0-ci-channel-plugin.md)
+- [`codev/plans/0-ci-channel-plugin.md`](codev/plans/0-ci-channel-plugin.md)
+- [`codev/reviews/0-ci-channel-plugin.md`](codev/reviews/0-ci-channel-plugin.md)
 
 ### Using Codev with Claude Code
 
