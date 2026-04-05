@@ -11,12 +11,13 @@ export interface BootstrapResult {
 }
 
 export interface BootstrapDeps {
+  ensureSecret(existing: string | null): { secret: string; generated: boolean }
   fetchSmeeChannel(): Promise<string | null>
   startSmeeClient(source: string, target: string): void
   pushNotification(content: string, meta: Record<string, string>): Promise<void>
 }
 
-function ensureSecret(existing: string | null): { secret: string; generated: boolean } {
+export function ensureSecretReal(existing: string | null): { secret: string; generated: boolean } {
   if (existing) {
     return { secret: existing, generated: false }
   }
@@ -32,13 +33,12 @@ function ensureSecret(existing: string | null): { secret: string; generated: boo
     if (existsSync(envPath)) {
       const content = readFileSync(envPath, 'utf-8')
       if (content.includes('WEBHOOK_SECRET=')) {
-        // Already present — extract and use it
         const match = content.match(/^WEBHOOK_SECRET=(.+)$/m)
         if (match) return { secret: match[1].trim(), generated: false }
       }
     }
 
-    appendFileSync(envPath, `\nWEBHOOK_SECRET=${secret}\n`)
+    appendFileSync(envPath, `WEBHOOK_SECRET=${secret}\n`)
     console.error(`[ci-channel] Generated webhook secret and saved to ${envPath}`)
   } catch (err) {
     console.error(`[ci-channel] Warning: could not write secret to ${DEFAULT_ENV_PATH}: ${err}`)
@@ -53,7 +53,7 @@ export async function bootstrap(
   deps: BootstrapDeps,
 ): Promise<BootstrapResult> {
   // Step 1: Ensure webhook secret
-  const { secret, generated: secretGenerated } = ensureSecret(config.webhookSecret)
+  const { secret, generated: secretGenerated } = deps.ensureSecret(config.webhookSecret)
 
   // Step 2: Resolve smee URL
   let smeeUrl = config.smeeUrl
@@ -67,14 +67,14 @@ export async function bootstrap(
     }
   }
 
-  // Step 3: Start smee client
+  // Step 3: Start smee client (note: actual relay startup may be async in production;
+  // bootstrap reports intent, not completion — relay starting a few ms late is harmless)
   if (smeeUrl) {
     try {
       deps.startSmeeClient(smeeUrl, localTarget)
       console.error(`[ci-channel] Webhook relay active: ${smeeUrl}`)
     } catch (err) {
       console.error(`[ci-channel] Warning: smee-client failed to start: ${err}`)
-      // Continue without relay — server still works for direct webhook delivery
     }
   }
 

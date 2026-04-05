@@ -9,7 +9,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { loadConfig } from "./lib/config.js";
 import { createWebhookHandler } from "./lib/handler.js";
 import { runStartupReconciliation } from "./lib/reconcile.js";
-import { bootstrap, fetchSmeeChannel } from "./lib/bootstrap.js";
+import { bootstrap, fetchSmeeChannel, ensureSecretReal } from "./lib/bootstrap.js";
 import { pushNotification } from "./lib/notify.js";
 import { githubForge } from "./lib/forges/github.js";
 import type { Forge } from "./lib/forge.js";
@@ -104,6 +104,17 @@ const httpServer = createServer(
   }
 );
 
+httpServer.on("error", (error: NodeJS.ErrnoException) => {
+  if (error.code === "EADDRINUSE") {
+    console.error(
+      `Port ${config.port} already in use. Use --port to specify a different port, or use port 0 for auto-assignment.`
+    );
+  } else {
+    console.error(`[ci-channel] HTTP server error: ${error.message}`);
+  }
+  process.exit(1);
+});
+
 httpServer.listen(config.port, "127.0.0.1", async () => {
   const addr = httpServer.address() as { port: number };
   console.error(`[ci-channel] Listening on port ${addr.port}`);
@@ -115,6 +126,7 @@ httpServer.listen(config.port, "127.0.0.1", async () => {
   // Bootstrap: auto-provision secret and smee channel
   try {
     const result = await bootstrap(config, localTarget, {
+      ensureSecret: ensureSecretReal,
       fetchSmeeChannel,
       startSmeeClient(source: string, target: string) {
         // Dynamic import — smee-client is optional
