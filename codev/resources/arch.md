@@ -31,6 +31,7 @@ ci-channel/
 │   │   └── gitea.ts           # Gitea Actions forge implementation
 │   ├── config.ts              # Configuration loading (CLI args + env vars + .env)
 │   ├── bootstrap.ts           # First-run auto-provisioning (secret, smee, notification)
+│   ├── exec.ts                # Subprocess runner (shared by CLI-based forges)
 │   ├── handler.ts             # Webhook handler pipeline (orchestrates the flow)
 │   ├── webhook.ts             # WebhookEvent interface, dedup, filtering (forge-agnostic)
 │   ├── notify.ts              # Notification formatting, sanitization, MCP push
@@ -112,9 +113,12 @@ Key config fields: `forge`, `webhookSecret` (nullable — auto-generated), `port
 
 Flow:
 1. Ensure webhook secret (generate if missing, write to `.env`)
-2. Provision smee.io channel (if `--smee-url` not provided)
-3. Start smee-client in-process
-4. Push setup notification via MCP channel
+2. Provision smee.io channel (if `--smee-url` not provided, 5s timeout)
+3. Persist smee URL to `.env` (survives restarts)
+4. Start smee-client in-process
+5. Push setup notification via MCP channel
+
+All bootstrap side effects are injectable via `BootstrapDeps` interface for testability.
 
 ### Webhook Handler (`lib/handler.ts`)
 
@@ -144,11 +148,15 @@ Exports:
 
 **Purpose**: Formats and sanitizes channel notifications.
 
+### Subprocess Runner (`lib/exec.ts`)
+
+**Purpose**: Shared subprocess helper for CLI-based forges (GitHub, GitLab).
+
+Exports `runCommand(args, timeoutMs)` — spawns a CLI command with timeout, returns stdout or null. All subprocess calls use `stdin: 'ignore'` to prevent consuming MCP stdin bytes.
+
 ### Reconciliation (`lib/reconcile.ts`)
 
 **Purpose**: Generic startup reconciliation loop. Iterates branches, calls `forge.runReconciliation()` per branch, applies workflow filter, pushes notifications.
-
-Also exports `runCommand()` — shared subprocess helper for CLI-based forges. All subprocess calls use `stdin: 'ignore'` to prevent consuming MCP stdin bytes.
 
 ## Data Flow
 
@@ -192,9 +200,10 @@ server.ts starts
     ├── Create webhook handler (with forge)
     ├── Start HTTP server on port 0
     └── listen callback:
-        ├── Bootstrap (ensure secret, provision smee, push notification)
-        ├── Start smee-client in-process
-        └── setTimeout(5s) → runStartupReconciliation()
+        └── setTimeout(5s) → (after MCP handshake completes)
+            ├── Bootstrap (ensure secret, provision smee, persist, push notification)
+            ├── Start smee-client in-process
+            └── runStartupReconciliation()
 ```
 
 ## Security Model
