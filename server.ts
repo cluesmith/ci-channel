@@ -12,6 +12,7 @@ import { runStartupReconciliation } from "./lib/reconcile.js";
 import { bootstrap, fetchSmeeChannel, ensureSecretReal } from "./lib/bootstrap.js";
 import { pushNotification } from "./lib/notify.js";
 import { githubForge } from "./lib/forges/github.js";
+import { gitlabForge } from "./lib/forges/gitlab.js";
 import type { Forge } from "./lib/forge.js";
 
 const config = loadConfig();
@@ -19,7 +20,8 @@ const config = loadConfig();
 // Select forge implementation based on config
 const forgeMap: Record<string, Forge> = {
   github: githubForge,
-  // gitlab and gitea added in later phases
+  gitlab: gitlabForge,
+  // gitea added in later phase
 };
 
 const forge = forgeMap[config.forge];

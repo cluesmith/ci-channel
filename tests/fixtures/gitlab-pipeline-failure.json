@@ -1,0 +1,65 @@
+{
+  "object_kind": "pipeline",
+  "object_attributes": {
+    "id": 98765,
+    "iid": 42,
+    "name": "CI/CD Pipeline",
+    "ref": "main",
+    "tag": false,
+    "sha": "deadbeef12345678deadbeef12345678deadbeef",
+    "before_sha": "0000000000000000000000000000000000000000",
+    "source": "push",
+    "status": "failed",
+    "detailed_status": "failed",
+    "stages": ["build", "test", "deploy"],
+    "created_at": "2026-04-05T10:00:00Z",
+    "finished_at": "2026-04-05T10:05:00Z",
+    "duration": 300
+  },
+  "user": {
+    "id": 1,
+    "name": "Waleed Kadous",
+    "username": "waleedkadous",
+    "email": "waleed@example.com"
+  },
+  "project": {
+    "id": 42,
+    "name": "my-app",
+    "description": "A test project",
+    "web_url": "https://gitlab.example.com/example/my-app",
+    "path_with_namespace": "example/my-app",
+    "default_branch": "main",
+    "namespace": "example"
+  },
+  "commit": {
+    "id": "deadbeef12345678deadbeef12345678deadbeef",
+    "message": "fix: update database migration",
+    "title": "fix: update database migration",
+    "timestamp": "2026-04-05T09:59:00Z",
+    "url": "https://gitlab.example.com/example/my-app/-/commit/deadbeef",
+    "author": {
+      "name": "waleedkadous",
+      "email": "waleed@example.com"
+    }
+  },
+  "builds": [
+    {
+      "id": 1001,
+      "stage": "build",
+      "name": "compile",
+      "status": "success"
+    },
+    {
+      "id": 1002,
+      "stage": "test",
+      "name": "unit-tests",
+      "status": "failed"
+    },
+    {
+      "id": 1003,
+      "stage": "test",
+      "name": "lint",
+      "status": "success"
+    }
+  ]
+}
