@@ -6,17 +6,17 @@ import {
 } from "node:http";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { loadConfig } from "./lib/config.js";
+import { loadConfig, type Config } from "./lib/config.js";
 import { createWebhookHandler } from "./lib/handler.js";
 import { runStartupReconciliation } from "./lib/reconcile.js";
-import { bootstrap, fetchSmeeChannel, ensureSecretReal } from "./lib/bootstrap.js";
+import { bootstrap, fetchSmeeChannel, ensureSecretReal, persistSmeeUrlReal } from "./lib/bootstrap.js";
 import { pushNotification } from "./lib/notify.js";
 import { githubForge } from "./lib/forges/github.js";
 import { gitlabForge } from "./lib/forges/gitlab.js";
 import { giteaForge } from "./lib/forges/gitea.js";
 import type { Forge } from "./lib/forge.js";
 
-const config = loadConfig();
+const initialConfig = loadConfig();
 
 // Select forge implementation based on config
 const forgeMap: Record<string, Forge> = {
@@ -25,12 +25,10 @@ const forgeMap: Record<string, Forge> = {
   gitea: giteaForge,
 };
 
-const forge = forgeMap[config.forge];
+const forge = forgeMap[initialConfig.forge];
 if (!forge) {
-  // This shouldn't happen — config validation catches invalid forge names.
-  // But during development, new forges may not be registered yet.
   throw new Error(
-    `Forge "${config.forge}" is not yet implemented. Available: ${Object.keys(forgeMap).join(", ")}`
+    `Forge "${initialConfig.forge}" is not yet implemented. Available: ${Object.keys(forgeMap).join(", ")}`
   );
 }
 
@@ -45,7 +43,7 @@ const mcp = new Server(
       'Each event arrives as <channel source="ci" workflow="..." branch="..." run_url="..." ...>.',
       "When you receive a failure alert:",
       "1. Read the workflow name and branch to understand what failed",
-      "2. Use the run_url to investigate (or run `gh run view <run_id>` for details)",
+      "2. Use the run_url to investigate the failure details",
       "3. Check recent commits on that branch with `git log`",
       "4. Investigate and fix the failure if possible",
       "These are one-way alerts — no reply is expected through the channel.",
@@ -55,7 +53,15 @@ const mcp = new Server(
 
 await mcp.connect(new StdioServerTransport());
 
-const handleWebhook = createWebhookHandler(config, mcp, forge);
+// Mutable config — bootstrap resolves the secret before webhooks are processed
+let resolvedConfig: Config = initialConfig;
+
+const handleWebhook = createWebhookHandler(
+  // Use a getter so the handler always sees the resolved config
+  new Proxy(initialConfig, { get: (_target, prop) => (resolvedConfig as any)[prop] }),
+  mcp,
+  forge,
+);
 
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -75,7 +81,6 @@ const httpServer = createServer(
       if (req.method === "POST" && (url.pathname === "/webhook" || url.pathname === "/webhook/github")) {
         const body = await readBody(req);
 
-        // Build a Web Request from the Node.js IncomingMessage
         const headers = new Headers();
         for (const [key, value] of Object.entries(req.headers)) {
           if (typeof value === "string") {
@@ -110,7 +115,7 @@ const httpServer = createServer(
 httpServer.on("error", (error: NodeJS.ErrnoException) => {
   if (error.code === "EADDRINUSE") {
     console.error(
-      `Port ${config.port} already in use. Use --port to specify a different port, or use port 0 for auto-assignment.`
+      `Port ${initialConfig.port} already in use. Use --port to specify a different port, or use port 0 for auto-assignment.`
     );
   } else {
     console.error(`[ci-channel] HTTP server error: ${error.message}`);
@@ -118,57 +123,64 @@ httpServer.on("error", (error: NodeJS.ErrnoException) => {
   process.exit(1);
 });
 
-httpServer.listen(config.port, "127.0.0.1", async () => {
+httpServer.listen(initialConfig.port, "127.0.0.1", () => {
   const addr = httpServer.address() as { port: number };
   console.error(`[ci-channel] Listening on port ${addr.port}`);
 
   // Determine webhook target path — use /webhook/github for GitHub backward compat
-  const webhookPath = config.forge === "github" ? "/webhook/github" : "/webhook";
+  const webhookPath = initialConfig.forge === "github" ? "/webhook/github" : "/webhook";
   const localTarget = `http://127.0.0.1:${addr.port}${webhookPath}`;
 
-  // Bootstrap: auto-provision secret and smee channel
-  try {
-    const result = await bootstrap(config, localTarget, {
-      ensureSecret: ensureSecretReal,
-      fetchSmeeChannel,
-      startSmeeClient(source: string, target: string) {
-        // Dynamic import — smee-client is optional
-        import("smee-client").then((mod) => {
-          const SmeeClient = mod.default;
-          const client = new SmeeClient({ source, target, logger: { info: () => {}, error: () => {} } });
-          const events = client.start();
+  // Delay bootstrap and reconciliation to ensure MCP handshake completes first.
+  // Writing to stdout before the initialize handshake corrupts the JSON-RPC stream.
+  setTimeout(async () => {
+    // Bootstrap: auto-provision secret and smee channel
+    try {
+      const result = await bootstrap(initialConfig, localTarget, {
+        ensureSecret: ensureSecretReal,
+        fetchSmeeChannel,
+        persistSmeeUrl: persistSmeeUrlReal,
+        startSmeeClient(source: string, target: string) {
+          import("smee-client").then((mod) => {
+            const SmeeClient = mod.default;
+            const client = new SmeeClient({ source, target, logger: { info: () => {}, error: () => {} } });
+            const events = client.start();
 
-          const cleanup = () => {
-            try { events.close(); } catch { /* already closed */ }
-          };
-          process.on("exit", cleanup);
-          process.on("SIGINT", () => { cleanup(); process.exit(0); });
-          process.on("SIGTERM", () => { cleanup(); process.exit(0); });
-          process.stdin.on("close", () => { cleanup(); process.exit(0); });
-        }).catch((err) => {
-          console.error(`[ci-channel] Warning: smee-client not available: ${err}`);
-        });
-      },
-      async pushNotification(content: string, meta: Record<string, string>) {
-        await pushNotification(mcp, { content, meta });
-      },
-    });
+            const cleanup = () => {
+              try { events.close(); } catch { /* already closed */ }
+            };
+            process.on("exit", cleanup);
+            process.on("SIGINT", () => { cleanup(); process.exit(0); });
+            process.on("SIGTERM", () => { cleanup(); process.exit(0); });
+            process.stdin.on("close", () => { cleanup(); process.exit(0); });
+          }).catch((err) => {
+            console.error(`[ci-channel] Warning: smee-client not available: ${err}`);
+          });
+        },
+        async pushNotification(content: string, meta: Record<string, string>) {
+          await pushNotification(mcp, { content, meta });
+        },
+      });
 
-    // Update config with resolved secret
-    if (result.webhookSecret && !config.webhookSecret) {
-      (config as any).webhookSecret = result.webhookSecret;
+      // Update resolved config with bootstrap results
+      if (result.webhookSecret) {
+        resolvedConfig = { ...initialConfig, webhookSecret: result.webhookSecret };
+        if (result.smeeUrl) {
+          resolvedConfig = { ...resolvedConfig, smeeUrl: result.smeeUrl };
+        }
+      }
+    } catch (err) {
+      console.error(`[ci-channel] Bootstrap failed: ${err}`);
     }
-  } catch (err) {
-    console.error(`[ci-channel] Bootstrap failed: ${err}`);
-  }
 
-  // Delay startup reconciliation to ensure MCP handshake completes first.
-  setTimeout(() => {
-    runStartupReconciliation(mcp, config, forge).catch((err) => {
+    // Startup reconciliation
+    try {
+      await runStartupReconciliation(mcp, resolvedConfig, forge);
+    } catch (err) {
       console.error(`[ci-channel] Startup reconciliation failed: ${err}`);
-    });
+    }
   }, 5000);
 });
 
 // Export for testing
-export { mcp, config, httpServer as server };
+export { mcp, resolvedConfig as config, httpServer as server };

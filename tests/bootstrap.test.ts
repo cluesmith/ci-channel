@@ -21,17 +21,21 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
 function makeDeps(overrides: Partial<BootstrapDeps> = {}): BootstrapDeps & {
   notifications: Array<{ content: string; meta: Record<string, string> }>
   smeeClients: Array<{ source: string; target: string }>
+  persistedSmeeUrls: string[]
 } {
   const notifications: Array<{ content: string; meta: Record<string, string> }> = []
   const smeeClients: Array<{ source: string; target: string }> = []
+  const persistedSmeeUrls: string[] = []
   return {
     notifications,
     smeeClients,
+    persistedSmeeUrls,
     ensureSecret: (existing) => {
       if (existing) return { secret: existing, generated: false }
       return { secret: 'generated-secret-abc123', generated: true }
     },
     fetchSmeeChannel: async () => 'https://smee.io/test-channel',
+    persistSmeeUrl: (url) => { persistedSmeeUrls.push(url) },
     startSmeeClient: (source, target) => { smeeClients.push({ source, target }) },
     pushNotification: async (content, meta) => { notifications.push({ content, meta }) },
     ...overrides,
@@ -139,6 +143,25 @@ describe('bootstrap', () => {
     // Should not throw
     const result = await bootstrap(makeConfig(), 'http://127.0.0.1:1234/webhook', deps)
     assert.strictEqual(result.wasProvisioned, true)
+  })
+
+  test('persists auto-provisioned smee URL', async () => {
+    const deps = makeDeps()
+    await bootstrap(makeConfig(), 'http://127.0.0.1:1234/webhook', deps)
+
+    assert.strictEqual(deps.persistedSmeeUrls.length, 1)
+    assert.strictEqual(deps.persistedSmeeUrls[0], 'https://smee.io/test-channel')
+  })
+
+  test('does not persist smee URL when provided via config', async () => {
+    const deps = makeDeps()
+    await bootstrap(
+      makeConfig({ smeeUrl: 'https://smee.io/existing' }),
+      'http://127.0.0.1:1234/webhook',
+      deps,
+    )
+
+    assert.strictEqual(deps.persistedSmeeUrls.length, 0)
   })
 
   test('idempotent: existing secret returned when ensureSecret finds one', async () => {

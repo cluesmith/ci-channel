@@ -2,7 +2,7 @@ import { timingSafeEqual } from 'node:crypto'
 import type { Forge } from '../forge.js'
 import type { ParseResult, WebhookEvent } from '../webhook.js'
 import type { Config } from '../config.js'
-import { runCommand } from '../reconcile.js'
+import { runCommand } from '../exec.js'
 
 const TERMINAL_STATES = new Set(['success', 'failed', 'canceled', 'skipped'])
 

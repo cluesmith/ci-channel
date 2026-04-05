@@ -13,6 +13,7 @@ export interface BootstrapResult {
 export interface BootstrapDeps {
   ensureSecret(existing: string | null): { secret: string; generated: boolean }
   fetchSmeeChannel(): Promise<string | null>
+  persistSmeeUrl(url: string): void
   startSmeeClient(source: string, target: string): void
   pushNotification(content: string, meta: Record<string, string>): Promise<void>
 }
@@ -62,6 +63,8 @@ export async function bootstrap(
     smeeUrl = await deps.fetchSmeeChannel()
     if (smeeUrl) {
       smeeProvisioned = true
+      // Persist to .env so the same URL survives restarts
+      deps.persistSmeeUrl(smeeUrl)
     } else {
       console.error('[ci-channel] Warning: could not provision smee channel — webhook relay not available')
     }
@@ -100,7 +103,12 @@ export async function bootstrap(
 
 export async function fetchSmeeChannel(): Promise<string | null> {
   try {
-    const resp = await fetch('https://smee.io/new', { redirect: 'manual' })
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 5000)
+
+    const resp = await fetch('https://smee.io/new', { redirect: 'manual', signal: controller.signal })
+    clearTimeout(timer)
+
     const location = resp.headers.get('location')
     if (location && location.startsWith('https://smee.io/')) {
       return location
@@ -108,7 +116,29 @@ export async function fetchSmeeChannel(): Promise<string | null> {
     console.error('[ci-channel] Warning: smee.io did not return a channel URL')
     return null
   } catch (err) {
-    console.error(`[ci-channel] Warning: could not reach smee.io: ${err}`)
+    if ((err as Error).name === 'AbortError') {
+      console.error('[ci-channel] Warning: smee.io timed out (5s) — continuing without relay')
+    } else {
+      console.error(`[ci-channel] Warning: could not reach smee.io: ${err}`)
+    }
     return null
+  }
+}
+
+export function persistSmeeUrlReal(url: string): void {
+  try {
+    const envPath = DEFAULT_ENV_PATH
+    const dir = dirname(envPath)
+    mkdirSync(dir, { recursive: true })
+
+    if (existsSync(envPath)) {
+      const content = readFileSync(envPath, 'utf-8')
+      if (content.includes('SMEE_URL=')) return // already persisted
+    }
+
+    appendFileSync(envPath, `SMEE_URL=${url}\n`)
+    console.error(`[ci-channel] Persisted smee URL to ${envPath}`)
+  } catch (err) {
+    console.error(`[ci-channel] Warning: could not persist smee URL: ${err}`)
   }
 }
