@@ -45,7 +45,7 @@ Structural config via CLI args in `.mcp.json`, secrets in `~/.claude/channels/ci
 
 ```bash
 npm install          # Install dependencies
-npm test             # Run all tests (170 tests across 12 files)
+npm test             # Run all tests (170 tests across 11 files)
 npx tsx server.ts    # Start the server
 ```
 

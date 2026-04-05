@@ -110,7 +110,14 @@ No `--forge` flag needed — GitHub is the default.
 | **Secret** | The secret from the notification |
 | **Events** | Select **"Workflow runs"** only |
 
+**`.env` file** (`~/.claude/channels/ci/.env`): auto-generated on first run. If configuring manually:
+```env
+WEBHOOK_SECRET=your-webhook-secret
+```
+
 **Optional CLI**: Install [gh CLI](https://cli.github.com/) for startup reconciliation and failed job enrichment.
+
+**Reference**: [GitHub Webhooks docs](https://docs.github.com/en/webhooks), [workflow_run event](https://docs.github.com/en/webhooks/webhook-events-and-payloads#workflow_run)
 
 ### GitLab CI
 
@@ -137,7 +144,14 @@ For nested namespaces, use the exact `path_with_namespace` value: `--repos "grou
 | **Secret token** | The secret from the notification |
 | **Trigger** | Check **Pipeline events** only |
 
+**`.env` file** (`~/.claude/channels/ci/.env`): auto-generated on first run. If configuring manually:
+```env
+WEBHOOK_SECRET=your-gitlab-secret-token
+```
+
 **Optional CLI**: Install [glab CLI](https://gitlab.com/gitlab-org/cli) for startup reconciliation and failed job enrichment.
+
+**Reference**: [GitLab Webhooks docs](https://docs.gitlab.com/ee/user/project/integrations/webhooks.html), [Pipeline events](https://docs.gitlab.com/ee/user/project/integrations/webhook_events.html#pipeline-events)
 
 ### Gitea Actions
 
@@ -167,7 +181,15 @@ GITEA_TOKEN=your-gitea-api-token
 | **Secret** | The secret from the notification |
 | **Events** | Select **"Workflow runs"** |
 
+**`.env` file** (`~/.claude/channels/ci/.env`):
+```env
+WEBHOOK_SECRET=your-webhook-secret
+GITEA_TOKEN=your-gitea-api-token
+```
+
 **Note**: `--gitea-url` is required for startup reconciliation and job enrichment (uses the Gitea API directly). `GITEA_TOKEN` enables authenticated API access.
+
+**Reference**: [Gitea Webhooks docs](https://docs.gitea.com/usage/webhooks)
 
 ## Configuration Reference
 
@@ -306,7 +328,7 @@ If the CLI/API is unavailable, the plugin logs a warning and continues — live 
 
 ```bash
 npm install          # Install dependencies
-npm test             # Run all tests (170 tests)
+npm test             # Run all tests (170 tests across 11 files)
 npx tsx server.ts    # Start the server
 ```
 
