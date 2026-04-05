@@ -13,6 +13,7 @@ import { bootstrap, fetchSmeeChannel, ensureSecretReal } from "./lib/bootstrap.j
 import { pushNotification } from "./lib/notify.js";
 import { githubForge } from "./lib/forges/github.js";
 import { gitlabForge } from "./lib/forges/gitlab.js";
+import { giteaForge } from "./lib/forges/gitea.js";
 import type { Forge } from "./lib/forge.js";
 
 const config = loadConfig();
@@ -21,7 +22,7 @@ const config = loadConfig();
 const forgeMap: Record<string, Forge> = {
   github: githubForge,
   gitlab: gitlabForge,
-  // gitea added in later phase
+  gitea: giteaForge,
 };
 
 const forge = forgeMap[config.forge];
