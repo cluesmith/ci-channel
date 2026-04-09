@@ -144,8 +144,9 @@ httpServer.listen(initialConfig.port, "127.0.0.1", () => {
         startSmeeClient(source: string, target: string) {
           import("smee-client").then((mod) => {
             const SmeeClient = mod.default;
-            const client = new SmeeClient({ source, target, logger: { info: () => {}, error: () => {} } });
+            const client = new SmeeClient({ source, target, logger: { info: () => {}, error: (...args: unknown[]) => console.error("[ci-channel] smee:", ...args) } });
             const events = client.start();
+            console.error(`[ci-channel] smee-client started: ${source} → ${target}`);
 
             const cleanup = () => {
               try { events.close(); } catch { /* already closed */ }
@@ -153,7 +154,6 @@ httpServer.listen(initialConfig.port, "127.0.0.1", () => {
             process.on("exit", cleanup);
             process.on("SIGINT", () => { cleanup(); process.exit(0); });
             process.on("SIGTERM", () => { cleanup(); process.exit(0); });
-            process.stdin.on("close", () => { cleanup(); process.exit(0); });
           }).catch((err) => {
             console.error(`[ci-channel] Warning: smee-client not available: ${err}`);
           });
