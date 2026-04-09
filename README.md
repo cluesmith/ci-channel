@@ -250,22 +250,18 @@ All CLI args also accept env vars for backward compatibility:
 }
 ```
 
-### Persistent smee channels
+### Smee channel management
 
-By default, the plugin auto-provisions a new smee.io channel on each startup. For a persistent channel URL (so you don't have to reconfigure forge webhooks):
+By default, the plugin auto-provisions a smee.io channel on first run and persists it to `state.json`, so the same URL is reused across restarts. You only configure your forge webhook once.
 
-```bash
-npx smee-client --new
-```
-
-Copy the URL and pass it via `--smee-url`:
+To use a manually provisioned channel instead (e.g., for shared team use), pass it via `--smee-url`:
 
 ```json
 {
   "mcpServers": {
     "ci": {
       "command": "npx",
-      "args": ["tsx", "server.ts", "--smee-url", "https://smee.io/your-persistent-channel"],
+      "args": ["tsx", "server.ts", "--smee-url", "https://smee.io/your-channel"],
       "cwd": "/path/to/ci-channel"
     }
   }

@@ -80,42 +80,50 @@ export const githubForge: Forge = {
     }
   },
 
-  async runReconciliation(_config: Config, branch: string, timeoutMs: number): Promise<WebhookEvent | null> {
-    const output = await runCommand(
-      ['gh', 'run', 'list', '--branch', branch, '--limit', '1', '--json', 'conclusion,name,headBranch,headSha,url,databaseId'],
-      timeoutMs,
-    )
+  async runReconciliation(config: Config, branch: string, timeoutMs: number): Promise<WebhookEvent | null> {
+    const repos = config.repos ?? [null] // null = implicit CWD repo
 
-    if (!output) {
-      console.error(`[ci-channel] Startup reconciliation: could not check branch "${branch}" (gh unavailable or timed out)`)
-      return null
+    for (const repo of repos) {
+      const args = ['gh', 'run', 'list', '--branch', branch, '--limit', '1', '--json', 'conclusion,name,headBranch,headSha,url,databaseId']
+      if (repo) args.push('--repo', repo)
+
+      const remaining = timeoutMs
+      const output = await runCommand(args, remaining)
+
+      if (!output) {
+        const target = repo ?? 'current directory'
+        console.error(`[ci-channel] Startup reconciliation: could not check ${target} branch "${branch}" (gh unavailable or timed out)`)
+        continue
+      }
+
+      let runs: any[]
+      try {
+        runs = JSON.parse(output)
+      } catch {
+        console.error(`[ci-channel] Startup reconciliation: invalid JSON from gh for branch "${branch}"`)
+        continue
+      }
+
+      if (!Array.isArray(runs) || runs.length === 0) continue
+
+      const run = runs[0]
+      if (run.conclusion !== 'failure') continue
+
+      return {
+        deliveryId: `reconcile-${branch}-${run.databaseId ?? 'unknown'}`,
+        workflowName: run.name ?? 'unknown',
+        conclusion: run.conclusion,
+        branch: run.headBranch ?? branch,
+        commitSha: run.headSha ?? 'unknown',
+        commitMessage: null,
+        commitAuthor: null,
+        runUrl: run.url ?? '',
+        runId: run.databaseId ?? 0,
+        repoFullName: repo ?? '',
+      }
     }
 
-    let runs: any[]
-    try {
-      runs = JSON.parse(output)
-    } catch {
-      console.error(`[ci-channel] Startup reconciliation: invalid JSON from gh for branch "${branch}"`)
-      return null
-    }
-
-    if (!Array.isArray(runs) || runs.length === 0) return null
-
-    const run = runs[0]
-    if (run.conclusion !== 'failure') return null
-
-    return {
-      deliveryId: `reconcile-${branch}-${run.databaseId ?? 'unknown'}`,
-      workflowName: run.name ?? 'unknown',
-      conclusion: run.conclusion,
-      branch: run.headBranch ?? branch,
-      commitSha: run.headSha ?? 'unknown',
-      commitMessage: null,
-      commitAuthor: null,
-      runUrl: run.url ?? '',
-      runId: run.databaseId ?? 0,
-      repoFullName: '',
-    }
+    return null
   },
 
   async fetchFailedJobs(_config: Config, repoFullName: string, runId: number): Promise<string[] | null> {

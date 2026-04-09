@@ -87,42 +87,50 @@ export const gitlabForge: Forge = {
     }
   },
 
-  async runReconciliation(_config: Config, branch: string, timeoutMs: number): Promise<WebhookEvent | null> {
-    const output = await runCommand(
-      ['glab', 'ci', 'list', '--branch', branch, '--per-page', '1', '--output', 'json'],
-      timeoutMs,
-    )
+  async runReconciliation(config: Config, branch: string, timeoutMs: number): Promise<WebhookEvent | null> {
+    const repos = config.repos ?? [null] // null = implicit CWD project
 
-    if (!output) {
-      console.error(`[ci-channel] Startup reconciliation: could not check branch "${branch}" (glab unavailable or timed out)`)
-      return null
+    for (const repo of repos) {
+      const args = ['glab', 'ci', 'list', '--branch', branch, '--per-page', '1', '--output', 'json']
+      if (repo) args.push('--repo', repo)
+
+      const remaining = timeoutMs
+      const output = await runCommand(args, remaining)
+
+      if (!output) {
+        const target = repo ?? 'current directory'
+        console.error(`[ci-channel] Startup reconciliation: could not check ${target} branch "${branch}" (glab unavailable or timed out)`)
+        continue
+      }
+
+      let pipelines: any[]
+      try {
+        pipelines = JSON.parse(output)
+      } catch {
+        console.error(`[ci-channel] Startup reconciliation: invalid JSON from glab for branch "${branch}"`)
+        continue
+      }
+
+      if (!Array.isArray(pipelines) || pipelines.length === 0) continue
+
+      const pipeline = pipelines[0]
+      if (pipeline.status !== 'failed') continue
+
+      return {
+        deliveryId: `reconcile-${branch}-${pipeline.id ?? 'unknown'}`,
+        workflowName: pipeline.name ?? pipeline.source ?? 'pipeline',
+        conclusion: pipeline.status,
+        branch: pipeline.ref ?? branch,
+        commitSha: pipeline.sha ?? 'unknown',
+        commitMessage: null,
+        commitAuthor: null,
+        runUrl: pipeline.web_url ?? '',
+        runId: pipeline.id ?? 0,
+        repoFullName: repo ?? '',
+      }
     }
 
-    let pipelines: any[]
-    try {
-      pipelines = JSON.parse(output)
-    } catch {
-      console.error(`[ci-channel] Startup reconciliation: invalid JSON from glab for branch "${branch}"`)
-      return null
-    }
-
-    if (!Array.isArray(pipelines) || pipelines.length === 0) return null
-
-    const pipeline = pipelines[0]
-    if (pipeline.status !== 'failed') return null
-
-    return {
-      deliveryId: `reconcile-${branch}-${pipeline.id ?? 'unknown'}`,
-      workflowName: pipeline.name ?? pipeline.source ?? 'pipeline',
-      conclusion: pipeline.status,
-      branch: pipeline.ref ?? branch,
-      commitSha: pipeline.sha ?? 'unknown',
-      commitMessage: null,
-      commitAuthor: null,
-      runUrl: pipeline.web_url ?? '',
-      runId: pipeline.id ?? 0,
-      repoFullName: '',
-    }
+    return null
   },
 
   async fetchFailedJobs(_config: Config, repoFullName: string, runId: number): Promise<string[] | null> {
