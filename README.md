@@ -374,7 +374,7 @@ tests/
 
 ## Contributing
 
-This is a [Codev](https://github.com/cluesmith/codev) project and follows the Codev methodology for AI-assisted development. The preferred way to contribute is via PRs generated with Codev.
+This is a [Codev](https://github.com/cluesmith/codev) project and follows the Codev methodology for AI-assisted development. The preferred way to contribute is via PRs generated with Codev — three documents in addition to the code changes.
 
 Each feature follows the **three-document model**:
 - **Specification** (`codev/specs/`) — What to build and why
