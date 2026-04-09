@@ -285,6 +285,31 @@ Forges occasionally retry webhook delivery. The plugin tracks the last 100 deliv
 - **Prompt injection prevention** — All user-controlled fields sanitized before inclusion in notifications
 - **Deduplication** — Prevents replay of duplicate webhook deliveries
 
+## How to Check It's Working
+
+1. **Verify the MCP server is connected:**
+   ```bash
+   claude mcp list
+   ```
+   The `ci` server should show `Connected`.
+
+2. **Check webhook deliveries are arriving:**
+   ```bash
+   gh api repos/OWNER/REPO/hooks --jq '.[0].id'
+   # Use the hook ID:
+   gh api repos/OWNER/REPO/hooks/HOOK_ID/deliveries --jq '.[:3] | .[] | {event, status_code, delivered_at}'
+   ```
+   You should see `workflow_run` events with `status_code: 200`.
+
+3. **Trigger a test failure:** Push a commit that breaks a test. Within a minute, you should see a channel notification like:
+   ```xml
+   <channel source="ci" workflow="CI" branch="main" run_url="..." conclusion="failure">
+   CI failure: CI on branch main — commit "break a test" by you
+   </channel>
+   ```
+
+4. **Check the plugin logs:** The plugin logs to stderr. If running locally, stderr output shows webhook receipt, signature validation, and notification delivery.
+
 ## Troubleshooting
 
 ### No notifications arriving
