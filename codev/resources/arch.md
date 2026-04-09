@@ -1,6 +1,6 @@
 # CI Channel — Architecture
 
-> Last updated: 2026-04-05
+> Last updated: 2026-04-09
 
 ## Overview
 
@@ -80,9 +80,9 @@ Each forge implements:
 
 | Forge | Signature | Event Type | CLI/API | File |
 |-------|-----------|------------|---------|------|
-| GitHub | HMAC-SHA256 (`X-Hub-Signature-256`) | `workflow_run` completed | `gh` CLI | `lib/forges/github.ts` |
-| GitLab | Token (`X-Gitlab-Token`) | `Pipeline Hook` terminal states | `glab` CLI | `lib/forges/gitlab.ts` |
-| Gitea | HMAC-SHA256 (`X-Gitea-Signature`, raw hex) | `workflow_run` completed | Gitea API via `fetch` | `lib/forges/gitea.ts` |
+| GitHub | HMAC-SHA256 (`X-Hub-Signature-256`) | `workflow_run` (all actions) | `gh` CLI | `lib/forges/github.ts` |
+| GitLab | Token (`X-Gitlab-Token`) | `Pipeline Hook` (all states) | `glab` CLI | `lib/forges/gitlab.ts` |
+| Gitea | HMAC-SHA256 (`X-Gitea-Signature`, raw hex) | `workflow_run` (all actions) | Gitea API via `fetch` | `lib/forges/gitea.ts` |
 
 ### MCP Server (`server.ts`)
 
@@ -218,6 +218,7 @@ server.ts starts
 4. **Input sanitization** — All user-controlled fields escaped and truncated before inclusion in notifications.
 5. **Deduplication** — Bounded 100-entry set prevents replay.
 6. **Subprocess isolation** — All child processes use `stdin: 'ignore'` to prevent MCP stdio corruption.
+7. **No stdin event handlers** — `process.stdin.on("close")` must never be used in MCP stdio servers; it kills long-lived in-process connections (smee-client EventSource).
 
 ## Conventions
 

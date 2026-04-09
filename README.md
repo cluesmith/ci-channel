@@ -381,7 +381,13 @@ Each feature follows the **three-document model**:
 - **Plan** (`codev/plans/`) — How to build it, in testable phases
 - **Review** (`codev/reviews/`) — What was learned, deviations from plan
 
-PRs that include Codev artifacts (spec, plan, review) are significantly easier to review and integrate. See `CLAUDE.md` for Claude Code-specific instructions and `AGENTS.md` for cross-tool AI agent compatibility (Cursor, GitHub Copilot, etc.).
+PRs that include Codev artifacts (spec, plan, review) are significantly easier to review and integrate.
+
+The project's architectural knowledge lives in:
+- **[Architecture](codev/resources/arch.md)** — System design, data flow, security model, component reference
+- **[Lessons Learned](codev/resources/lessons-learned.md)** — Accumulated insights from reviews and production use
+
+See `CLAUDE.md` for Claude Code-specific instructions and `AGENTS.md` for cross-tool AI agent compatibility (Cursor, GitHub Copilot, etc.).
 
 ## License
 
