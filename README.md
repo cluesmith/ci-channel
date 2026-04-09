@@ -372,9 +372,16 @@ tests/
   fixtures/                # Sample webhook payloads per forge
 ```
 
-### Development with Codev
+## Contributing
 
-This project uses [Codev](https://github.com/cluesmith/codev) for AI-assisted development. See `CLAUDE.md` for instructions and `AGENTS.md` for cross-tool AI agent compatibility.
+This is a [Codev](https://github.com/cluesmith/codev) project and follows the Codev methodology for AI-assisted development. The preferred way to contribute is via PRs generated with Codev.
+
+Each feature follows the **three-document model**:
+- **Specification** (`codev/specs/`) — What to build and why
+- **Plan** (`codev/plans/`) — How to build it, in testable phases
+- **Review** (`codev/reviews/`) — What was learned, deviations from plan
+
+PRs that include Codev artifacts (spec, plan, review) are significantly easier to review and integrate. See `CLAUDE.md` for Claude Code-specific instructions and `AGENTS.md` for cross-tool AI agent compatibility (Cursor, GitHub Copilot, etc.).
 
 ## License
 
