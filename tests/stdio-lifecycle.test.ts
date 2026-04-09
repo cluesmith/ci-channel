@@ -134,7 +134,7 @@ describe('stdio lifecycle (regression for #457)', () => {
     const notification = stdoutLines.find(line => {
       try {
         const msg = JSON.parse(line)
-        return msg.method === 'notifications/claude/channel'
+        return msg.method === 'notifications/claude/channel' && msg.params?.meta?.workflow
       } catch { return false }
     })
 

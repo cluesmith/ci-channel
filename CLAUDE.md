@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-A Claude Code channel plugin that delivers real-time GitHub Actions CI/CD notifications into running Claude Code sessions. Built with the MCP (Model Context Protocol) SDK.
+A Claude Code channel plugin that delivers real-time CI/CD notifications into running Claude Code sessions. Supports GitHub Actions, GitLab CI, and Gitea Actions. Built with the MCP (Model Context Protocol) SDK.
 
 This project uses **[Codev](https://github.com/cluesmith/codev)** for AI-assisted development.
 
@@ -11,12 +11,27 @@ This project uses **[Codev](https://github.com/cluesmith/codev)** for AI-assiste
 See `codev/resources/arch.md` for the full architecture document.
 
 **Key components:**
-- `server.ts` — MCP server entry point (HTTP server, smee-client, reconciliation)
-- `lib/config.ts` — Configuration loading (.env + environment variables)
+- `server.ts` — MCP server entry point (HTTP server, bootstrap, smee in-process, reconciliation)
+- `lib/forge.ts` — Forge interface definition (strategy pattern for multi-forge support)
+- `lib/forges/github.ts` — GitHub Actions forge (HMAC-SHA256, workflow_run, gh CLI)
+- `lib/forges/gitlab.ts` — GitLab CI forge (token validation, Pipeline Hook, glab CLI)
+- `lib/forges/gitea.ts` — Gitea Actions forge (HMAC-SHA256, workflow_run, fetch API)
+- `lib/config.ts` — Configuration loading (CLI args + env vars + .env file)
+- `lib/bootstrap.ts` — First-run auto-provisioning (secret generation, smee channel, setup notification)
 - `lib/handler.ts` — Webhook handler pipeline (validate → dedup → filter → notify)
-- `lib/webhook.ts` — GitHub webhook parsing, HMAC signature validation, deduplication
+- `lib/webhook.ts` — WebhookEvent interface, deduplication, filtering (forge-agnostic)
 - `lib/notify.ts` — Notification formatting and input sanitization
-- `lib/reconcile.ts` — Startup reconciliation and async job enrichment
+- `lib/reconcile.ts` — Startup reconciliation orchestration
+
+## Configuration
+
+Structural config via CLI args in `.mcp.json`, secrets in `~/.claude/channels/ci/.env`.
+
+**CLI args**: `--forge`, `--repos`, `--workflow-filter`, `--reconcile-branches`, `--port`, `--gitea-url`, `--smee-url`
+
+**Secrets**: `WEBHOOK_SECRET` (auto-generated), `GITEA_TOKEN`
+
+**Precedence**: CLI args > env vars > `.env` file
 
 ## Key Locations
 
@@ -30,8 +45,8 @@ See `codev/resources/arch.md` for the full architecture document.
 
 ```bash
 npm install          # Install dependencies
-npm test             # Run all tests (83 tests across 6 files)
-npx tsx server.ts    # Start the server (requires WEBHOOK_SECRET)
+npm test             # Run all tests (170 tests across 11 files)
+npx tsx server.ts    # Start the server
 ```
 
 ## Codev Workflow
@@ -63,4 +78,5 @@ Commit message format:
 - **MCP stdio isolation**: All subprocess calls must use `stdin: 'ignore'` to prevent consuming MCP stdin bytes. See `codev/resources/lessons-learned.md`.
 - **Sanitize at the boundary**: All user-controlled input (commit messages, branch names) must be sanitized in `notify.ts` before reaching MCP.
 - **Never block on enrichment**: Job-detail enrichment is fire-and-forget, never blocks the primary notification.
-- **Fail fast**: Missing required config throws immediately, no fallbacks.
+- **Forge strategy pattern**: All forge-specific behavior (signature validation, event parsing, reconciliation, enrichment) goes in `lib/forges/`. The handler and reconciler are forge-agnostic.
+- **Bootstrap auto-provisioning**: Secret and smee channel are auto-generated on first run. Setup instructions pushed via channel notification.

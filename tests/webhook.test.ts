@@ -1,12 +1,19 @@
 import { describe, test, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHmac } from 'node:crypto'
-import { validateSignature, parseWebhookEvent, isDuplicate, clearDedup, isRepoAllowed, isWorkflowAllowed } from '../lib/webhook.js'
+import { githubForge } from '../lib/forges/github.js'
+import { isDuplicate, clearDedup, isRepoAllowed, isWorkflowAllowed } from '../lib/webhook.js'
 
 const SECRET = 'test-secret-key'
 
 function sign(payload: string): string {
   return 'sha256=' + createHmac('sha256', SECRET).update(payload).digest('hex')
+}
+
+function makeHeaders(extra: Record<string, string> = {}): Headers {
+  const h = new Headers()
+  for (const [k, v] of Object.entries(extra)) h.set(k, v)
+  return h
 }
 
 function makeFailurePayload(overrides: { workflow_run?: Record<string, any>; repository?: Record<string, any> } = {}): string {
@@ -32,41 +39,44 @@ function makeFailurePayload(overrides: { workflow_run?: Record<string, any>; rep
   })
 }
 
-describe('validateSignature', () => {
+describe('githubForge.validateSignature', () => {
   test('accepts valid signature', () => {
     const payload = '{"test": true}'
     const sig = sign(payload)
-    assert.strictEqual(validateSignature(payload, sig, SECRET), true)
+    assert.strictEqual(githubForge.validateSignature(payload, makeHeaders({ 'x-hub-signature-256': sig }), SECRET), true)
   })
 
   test('rejects invalid signature', () => {
     const payload = '{"test": true}'
-    assert.strictEqual(validateSignature(payload, 'sha256=deadbeef00000000000000000000000000000000000000000000000000000000', SECRET), false)
+    assert.strictEqual(githubForge.validateSignature(payload, makeHeaders({ 'x-hub-signature-256': 'sha256=deadbeef00000000000000000000000000000000000000000000000000000000' }), SECRET), false)
   })
 
   test('rejects null signature', () => {
-    assert.strictEqual(validateSignature('payload', null, SECRET), false)
+    assert.strictEqual(githubForge.validateSignature('payload', makeHeaders(), SECRET), false)
   })
 
   test('rejects signature without sha256= prefix', () => {
-    assert.strictEqual(validateSignature('payload', 'invalid-format', SECRET), false)
+    assert.strictEqual(githubForge.validateSignature('payload', makeHeaders({ 'x-hub-signature-256': 'invalid-format' }), SECRET), false)
   })
 
   test('rejects tampered payload', () => {
     const payload = '{"test": true}'
     const sig = sign(payload)
-    assert.strictEqual(validateSignature('{"test": false}', sig, SECRET), false)
+    assert.strictEqual(githubForge.validateSignature('{"test": false}', makeHeaders({ 'x-hub-signature-256': sig }), SECRET), false)
   })
 
   test('rejects signature with wrong length', () => {
-    assert.strictEqual(validateSignature('payload', 'sha256=short', SECRET), false)
+    assert.strictEqual(githubForge.validateSignature('payload', makeHeaders({ 'x-hub-signature-256': 'sha256=short' }), SECRET), false)
   })
 })
 
-describe('parseWebhookEvent', () => {
+describe('githubForge.parseWebhookEvent', () => {
   test('parses failure event correctly', () => {
     const body = makeFailurePayload()
-    const result = parseWebhookEvent('workflow_run', 'delivery-1', body)
+    const result = githubForge.parseWebhookEvent(
+      makeHeaders({ 'x-github-event': 'workflow_run', 'x-github-delivery': 'delivery-1' }),
+      body,
+    )
 
     assert.strictEqual(result.type, 'event')
     if (result.type !== 'event') throw new Error('Expected event')
@@ -84,7 +94,10 @@ describe('parseWebhookEvent', () => {
 
   test('returns event for success conclusion (all completions processed)', () => {
     const body = makeFailurePayload({ workflow_run: { conclusion: 'success' } })
-    const result = parseWebhookEvent('workflow_run', 'delivery-2', body)
+    const result = githubForge.parseWebhookEvent(
+      makeHeaders({ 'x-github-event': 'workflow_run', 'x-github-delivery': 'delivery-2' }),
+      body,
+    )
     assert.strictEqual(result.type, 'event')
     if (result.type === 'event') {
       assert.strictEqual(result.event.conclusion, 'success')
@@ -93,22 +106,31 @@ describe('parseWebhookEvent', () => {
 
   test('returns irrelevant for non-completed action', () => {
     const body = JSON.stringify({ action: 'requested', workflow_run: { conclusion: 'failure' }, repository: { full_name: 'o/r' } })
-    const result = parseWebhookEvent('workflow_run', 'delivery-3', body)
+    const result = githubForge.parseWebhookEvent(
+      makeHeaders({ 'x-github-event': 'workflow_run', 'x-github-delivery': 'delivery-3' }),
+      body,
+    )
     assert.strictEqual(result.type, 'irrelevant')
   })
 
   test('returns irrelevant for non-workflow_run event with valid JSON', () => {
-    const result = parseWebhookEvent('push', 'delivery-4', '{"ref": "refs/heads/main"}')
+    const result = githubForge.parseWebhookEvent(
+      makeHeaders({ 'x-github-event': 'push', 'x-github-delivery': 'delivery-4' }),
+      '{"ref": "refs/heads/main"}',
+    )
     assert.strictEqual(result.type, 'irrelevant')
   })
 
-  test('returns irrelevant for null event type with valid JSON', () => {
-    const result = parseWebhookEvent(null, 'delivery-5', '{}')
+  test('returns irrelevant for missing event type with valid JSON', () => {
+    const result = githubForge.parseWebhookEvent(makeHeaders({ 'x-github-delivery': 'delivery-5' }), '{}')
     assert.strictEqual(result.type, 'irrelevant')
   })
 
   test('returns malformed for invalid JSON on workflow_run event', () => {
-    const result = parseWebhookEvent('workflow_run', 'delivery-6', 'not json{{{')
+    const result = githubForge.parseWebhookEvent(
+      makeHeaders({ 'x-github-event': 'workflow_run', 'x-github-delivery': 'delivery-6' }),
+      'not json{{{',
+    )
     assert.strictEqual(result.type, 'malformed')
     if (result.type === 'malformed') {
       assert.ok(result.reason.includes('Invalid JSON'))
@@ -116,18 +138,26 @@ describe('parseWebhookEvent', () => {
   })
 
   test('returns malformed for invalid JSON on non-workflow_run event', () => {
-    // JSON is parsed BEFORE checking event type — malformed payloads always get 400
-    const result = parseWebhookEvent('push', 'delivery-6b', 'not valid json')
+    const result = githubForge.parseWebhookEvent(
+      makeHeaders({ 'x-github-event': 'push', 'x-github-delivery': 'delivery-6b' }),
+      'not valid json',
+    )
     assert.strictEqual(result.type, 'malformed')
   })
 
   test('returns malformed for non-object payload', () => {
-    const result = parseWebhookEvent('workflow_run', 'delivery-7', '"just a string"')
+    const result = githubForge.parseWebhookEvent(
+      makeHeaders({ 'x-github-event': 'workflow_run', 'x-github-delivery': 'delivery-7' }),
+      '"just a string"',
+    )
     assert.strictEqual(result.type, 'malformed')
   })
 
   test('returns malformed for missing workflow_run', () => {
-    const result = parseWebhookEvent('workflow_run', 'delivery-8', '{"action": "completed"}')
+    const result = githubForge.parseWebhookEvent(
+      makeHeaders({ 'x-github-event': 'workflow_run', 'x-github-delivery': 'delivery-8' }),
+      '{"action": "completed"}',
+    )
     assert.strictEqual(result.type, 'malformed')
   })
 
@@ -137,13 +167,19 @@ describe('parseWebhookEvent', () => {
       workflow_run: { conclusion: 'failure', id: 1, name: 'test' },
       repository: {},
     })
-    const result = parseWebhookEvent('workflow_run', 'delivery-9', body)
+    const result = githubForge.parseWebhookEvent(
+      makeHeaders({ 'x-github-event': 'workflow_run', 'x-github-delivery': 'delivery-9' }),
+      body,
+    )
     assert.strictEqual(result.type, 'malformed')
   })
 
   test('handles missing head_commit gracefully', () => {
     const body = makeFailurePayload({ workflow_run: { head_commit: undefined } })
-    const result = parseWebhookEvent('workflow_run', 'delivery-10', body)
+    const result = githubForge.parseWebhookEvent(
+      makeHeaders({ 'x-github-event': 'workflow_run', 'x-github-delivery': 'delivery-10' }),
+      body,
+    )
 
     assert.strictEqual(result.type, 'event')
     if (result.type !== 'event') throw new Error('Expected event')
@@ -153,7 +189,10 @@ describe('parseWebhookEvent', () => {
 
   test('handles missing head_commit.author gracefully', () => {
     const body = makeFailurePayload({ workflow_run: { head_commit: { message: 'test' } } })
-    const result = parseWebhookEvent('workflow_run', 'delivery-11', body)
+    const result = githubForge.parseWebhookEvent(
+      makeHeaders({ 'x-github-event': 'workflow_run', 'x-github-delivery': 'delivery-11' }),
+      body,
+    )
 
     assert.strictEqual(result.type, 'event')
     if (result.type !== 'event') throw new Error('Expected event')
@@ -182,15 +221,11 @@ describe('isDuplicate', () => {
   })
 
   test('evicts oldest when at capacity', () => {
-    // Fill to capacity
     for (let i = 0; i < 100; i++) {
       isDuplicate(`id-${i}`)
     }
-    // id-1 should still be tracked before any eviction
     assert.strictEqual(isDuplicate('id-1'), true)
-    // Adding a new entry should evict id-0 (the oldest)
     isDuplicate('id-100')
-    // id-0 was evicted, so it's no longer a duplicate
     assert.strictEqual(isDuplicate('id-0'), false)
   })
 })

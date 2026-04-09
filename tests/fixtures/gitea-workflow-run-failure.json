@@ -1,0 +1,22 @@
+{
+  "action": "completed",
+  "workflow_run": {
+    "id": 54321,
+    "name": "CI",
+    "head_branch": "develop",
+    "head_sha": "cafebabe12345678cafebabe12345678cafebabe",
+    "html_url": "https://gitea.example.com/owner/my-app/actions/runs/54321",
+    "conclusion": "failure",
+    "head_commit": {
+      "message": "feat: add search endpoint",
+      "author": {
+        "name": "waleedkadous"
+      }
+    }
+  },
+  "repository": {
+    "id": 10,
+    "full_name": "owner/my-app",
+    "html_url": "https://gitea.example.com/owner/my-app"
+  }
+}

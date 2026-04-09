@@ -1,46 +1,40 @@
 # CI Channel for Claude Code
 
-Real-time CI/CD failure notifications delivered straight into your Claude Code session. When a CI workflow fails, Claude sees it immediately and can investigate the failure, check logs, and suggest fixes — without you having to context-switch.
+Real-time CI/CD notifications delivered straight into your Claude Code session. When a CI workflow or pipeline fails, Claude sees it immediately and can investigate the failure, check logs, and suggest fixes — without you having to context-switch.
+
+Supports **GitHub Actions**, **GitLab CI**, and **Gitea Actions**.
 
 ## How It Works
 
 ```
-GitHub Actions ──webhook──▸ smee.io ──forward──▸ localhost:8789
-                                                      │
-                                              ┌───────┴───────┐
-                                              │ Channel Plugin │
-                                              │  (MCP server)  │
-                                              └───────┬───────┘
-                                                      │
-                                              ┌───────┴───────┐
-                                              │  Claude Code   │
-                                              │   (session)    │
-                                              └───────────────┘
+Forge (GitHub/GitLab/Gitea)
+        │
+    webhook POST
+        │
+        ▼
+   smee.io (relay)     ← auto-provisioned on first run
+        │
+        ▼
+   localhost:{port}    ← random port, no conflicts
+        │
+        ▼
+┌───────────────────┐
+│  Channel Plugin   │  ← validates signature, deduplicates, filters
+│   (MCP server)    │
+└─────────┬─────────┘
+          │
+          ▼
+┌───────────────────┐
+│   Claude Code     │  ← receives structured notification
+│    (session)      │
+└───────────────────┘
 ```
 
-1. GitHub sends a `workflow_run` webhook when a workflow completes
-2. [smee.io](https://smee.io) relays it to the plugin's local HTTP server
-3. The plugin validates the HMAC signature, deduplicates, and filters
-4. A channel notification is pushed into the Claude Code session
-5. Claude sees the failure and can investigate immediately
+## Zero-Config Quick Start
 
-When Claude receives a failure alert, it looks like this:
+The plugin auto-generates a webhook secret and provisions a smee.io relay on first run. You just need to:
 
-```xml
-<channel source="ci" workflow="CI" branch="main" run_url="https://github.com/..." conclusion="failure">
-CI failure: CI on branch main — commit "fix: widget alignment" by developer
-</channel>
-```
-
-## Prerequisites
-
-- **Node.js** v20+
-- **[gh CLI](https://cli.github.com/)** installed and authenticated (for startup reconciliation and job enrichment)
-- **Claude Code** v2.1.80+ (channels support)
-
-## Quick Start
-
-### 1. Clone the plugin
+### 1. Clone and install
 
 ```bash
 git clone https://github.com/cluesmith/ci-channel.git
@@ -48,39 +42,7 @@ cd ci-channel
 npm install
 ```
 
-### 2. Create a smee.io channel
-
-Go to [smee.io](https://smee.io/) and click **Start a new channel**. Copy the URL — you'll need it in step 4.
-
-smee.io acts as a public relay that forwards GitHub webhooks to your local machine, even behind NAT/firewalls.
-
-### 3. Configure your GitHub webhook
-
-In your GitHub repository (or organization): **Settings > Webhooks > Add webhook**
-
-| Field | Value |
-|-------|-------|
-| **Payload URL** | Your smee.io channel URL |
-| **Content type** | `application/json` |
-| **Secret** | A strong random string (you'll use this in step 4) |
-| **Events** | Select **"Workflow runs"** only |
-
-### 4. Configure the plugin
-
-Create the config directory and `.env` file:
-
-```bash
-mkdir -p ~/.claude/channels/ci
-```
-
-Create `~/.claude/channels/ci/.env`:
-
-```env
-WEBHOOK_SECRET=your-github-webhook-secret-here
-SMEE_URL=https://smee.io/your-channel-url
-```
-
-### 5. Register the MCP server
+### 2. Register the MCP server
 
 Add to your project's `.mcp.json` (or `~/.claude/.mcp.json` for global):
 
@@ -96,169 +58,313 @@ Add to your project's `.mcp.json` (or `~/.claude/.mcp.json` for global):
 }
 ```
 
-### 6. Start Claude Code
+### 3. Start Claude Code
 
 ```bash
 claude
 ```
 
-The plugin starts automatically as an MCP server. When a workflow fails, Claude will be notified in real-time.
+On first run, the plugin:
+1. Generates a `WEBHOOK_SECRET` and provisions a smee.io relay channel
+2. Saves auto-provisioned state to `~/.claude/channels/ci/state.json` (persists across restarts)
+3. Sends a channel notification to Claude with the webhook URL and secret:
 
-## Configuration
+```
+CI channel ready. Configure your forge webhook:
+  URL: https://smee.io/abc123
+  Secret: a1b2c3d4...
+  Events: Workflow runs (GitHub/Gitea) or Pipeline events (GitLab)
+```
 
-All configuration goes in `~/.claude/channels/ci/.env` or as environment variables.
+### 4. Configure your forge webhook
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `WEBHOOK_SECRET` | Yes | — | Shared secret for HMAC-SHA256 signature validation |
-| `PORT` | No | `8789` | HTTP server port for receiving webhooks |
-| `SMEE_URL` | No | — | smee.io channel URL (plugin auto-spawns smee-client if set) |
-| `GITHUB_REPOS` | No | — | Comma-separated repo allowlist (e.g., `owner/repo1,owner/repo2`) |
-| `WORKFLOW_FILTER` | No | — | Comma-separated workflow names to monitor (e.g., `CI,Deploy`) |
-| `RECONCILE_BRANCHES` | No | `ci,develop` | Branches to check for recent failures on startup |
+Copy the URL and secret from the notification and paste them into your forge's webhook settings (see [Per-Forge Setup Guides](#per-forge-setup-guides) below).
+
+That's it. No `.env` file to create manually, no browser visit to smee.io.
+
+## Per-Forge Setup Guides
+
+### GitHub Actions
+
+**`.mcp.json` configuration:**
+```json
+{
+  "mcpServers": {
+    "ci": {
+      "command": "npx",
+      "args": ["tsx", "server.ts"],
+      "cwd": "/path/to/ci-channel"
+    }
+  }
+}
+```
+
+No `--forge` flag needed — GitHub is the default.
+
+**Webhook configuration** — Go to your GitHub repo: **Settings > Webhooks > Add webhook**
+
+| Field | Value |
+|-------|-------|
+| **Payload URL** | The smee.io URL from the notification |
+| **Content type** | `application/json` |
+| **Secret** | The secret from the notification |
+| **Events** | Select **"Workflow runs"** only |
+
+**`.env` file** (`~/.claude/channels/ci/.env`): auto-generated on first run. If configuring manually:
+```env
+WEBHOOK_SECRET=your-webhook-secret
+```
+
+**Optional CLI**: Install [gh CLI](https://cli.github.com/) for startup reconciliation and failed job enrichment.
+
+**Reference**: [GitHub Webhooks docs](https://docs.github.com/en/webhooks), [workflow_run event](https://docs.github.com/en/webhooks/webhook-events-and-payloads#workflow_run)
+
+### GitLab CI
+
+**`.mcp.json` configuration:**
+```json
+{
+  "mcpServers": {
+    "ci": {
+      "command": "npx",
+      "args": ["tsx", "server.ts", "--forge", "gitlab", "--repos", "group/project"],
+      "cwd": "/path/to/ci-channel"
+    }
+  }
+}
+```
+
+For nested namespaces, use the exact `path_with_namespace` value: `--repos "group/subgroup/project"`.
+
+**Webhook configuration** — Go to your GitLab project: **Settings > Webhooks > Add new webhook**
+
+| Field | Value |
+|-------|-------|
+| **URL** | The smee.io URL from the notification |
+| **Secret token** | The secret from the notification |
+| **Trigger** | Check **Pipeline events** only |
+
+**`.env` file** (`~/.claude/channels/ci/.env`): auto-generated on first run. If configuring manually:
+```env
+WEBHOOK_SECRET=your-gitlab-secret-token
+```
+
+**Optional CLI**: Install [glab CLI](https://gitlab.com/gitlab-org/cli) for startup reconciliation and failed job enrichment.
+
+**Reference**: [GitLab Webhooks docs](https://docs.gitlab.com/ee/user/project/integrations/webhooks.html), [Pipeline events](https://docs.gitlab.com/ee/user/project/integrations/webhook_events.html#pipeline-events)
+
+### Gitea Actions
+
+**`.mcp.json` configuration:**
+```json
+{
+  "mcpServers": {
+    "ci": {
+      "command": "npx",
+      "args": ["tsx", "server.ts", "--forge", "gitea", "--gitea-url", "https://your-gitea-instance.com", "--repos", "owner/repo"],
+      "cwd": "/path/to/ci-channel"
+    }
+  }
+}
+```
+
+**Secrets** — Add to `~/.claude/channels/ci/.env`:
+```env
+GITEA_TOKEN=your-gitea-api-token
+```
+
+**Webhook configuration** — Go to your Gitea repo: **Settings > Webhooks > Add Webhook > Gitea**
+
+| Field | Value |
+|-------|-------|
+| **Target URL** | The smee.io URL from the notification |
+| **Secret** | The secret from the notification |
+| **Events** | Select **"Workflow runs"** |
+
+**`.env` file** (`~/.claude/channels/ci/.env`):
+```env
+WEBHOOK_SECRET=your-webhook-secret
+GITEA_TOKEN=your-gitea-api-token
+```
+
+**Note**: `--gitea-url` is required for startup reconciliation and job enrichment (uses the Gitea API directly). `GITEA_TOKEN` enables authenticated API access.
+
+**Reference**: [Gitea Webhooks docs](https://docs.gitea.com/usage/webhooks)
+
+## Configuration Reference
+
+Configuration uses CLI args in `.mcp.json` for structural settings, and `~/.claude/channels/ci/.env` for secrets. Auto-provisioned state (generated secret, smee URL) is persisted to `~/.claude/channels/ci/state.json`.
+
+Precedence: CLI args > env vars > `.env` file > `state.json`.
+
+### CLI args (structural config)
+
+| Arg | Default | Description |
+|-----|---------|-------------|
+| `--forge` | `github` | Forge type: `github`, `gitlab`, or `gitea` |
+| `--repos` | — | Comma-separated repo/project allowlist |
+| `--workflow-filter` | — | Comma-separated workflow names to monitor |
+| `--reconcile-branches` | `ci,develop` | Branches to check for recent failures on startup |
+| `--port` | `0` (random) | HTTP server port (0 = OS-assigned) |
+| `--gitea-url` | — | Gitea instance base URL (required for Gitea reconciliation) |
+| `--smee-url` | — | smee.io channel URL (auto-provisioned if not set) |
+
+### Secrets (`.env` file)
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `WEBHOOK_SECRET` | No (auto-generated) | Shared secret for webhook signature validation |
+| `GITEA_TOKEN` | No | Gitea API token for authenticated access |
+
+### Backward-compatible env vars
+
+All CLI args also accept env vars for backward compatibility:
+
+| Env var | Maps to | Notes |
+|---------|---------|-------|
+| `FORGE` | `--forge` | CLI arg takes precedence |
+| `REPOS` | `--repos` | CLI arg takes precedence |
+| `GITHUB_REPOS` | `--repos` | Legacy alias, lowest precedence |
+| `PORT` | `--port` | CLI arg takes precedence |
+| `SMEE_URL` | `--smee-url` | CLI arg takes precedence |
+| `WORKFLOW_FILTER` | `--workflow-filter` | CLI arg takes precedence |
+| `RECONCILE_BRANCHES` | `--reconcile-branches` | CLI arg takes precedence |
+| `GITEA_URL` | `--gitea-url` | CLI arg takes precedence |
 
 ### Example: Monitor specific repos and workflows
 
-```env
-WEBHOOK_SECRET=super-secret-value
-SMEE_URL=https://smee.io/abc123
-GITHUB_REPOS=myorg/api,myorg/frontend
-WORKFLOW_FILTER=CI,Deploy to Production
-RECONCILE_BRANCHES=main,develop
+```json
+{
+  "mcpServers": {
+    "ci": {
+      "command": "npx",
+      "args": [
+        "tsx", "server.ts",
+        "--repos", "myorg/api,myorg/frontend",
+        "--workflow-filter", "CI,Deploy to Production",
+        "--reconcile-branches", "main,develop"
+      ],
+      "cwd": "/path/to/ci-channel"
+    }
+  }
+}
+```
+
+### Smee channel management
+
+By default, the plugin auto-provisions a smee.io channel on first run and persists it to `state.json`, so the same URL is reused across restarts. You only configure your forge webhook once.
+
+To use a manually provisioned channel instead (e.g., for shared team use), pass it via `--smee-url`:
+
+```json
+{
+  "mcpServers": {
+    "ci": {
+      "command": "npx",
+      "args": ["tsx", "server.ts", "--smee-url", "https://smee.io/your-channel"],
+      "cwd": "/path/to/ci-channel"
+    }
+  }
+}
 ```
 
 ## Features
 
 ### Startup Reconciliation
 
-When the plugin starts, it runs `gh run list` to check if any recent workflows failed while Claude Code was offline. This catches failures you might have missed between sessions.
+When the plugin starts, it checks configured branches for recent CI failures that occurred while offline:
+- **GitHub**: `gh run list` (requires gh CLI)
+- **GitLab**: `glab ci list` (requires glab CLI)
+- **Gitea**: Gitea API via `--gitea-url`
 
 ### Job Enrichment
 
-After pushing the initial failure notification, the plugin asynchronously fetches the names of failed jobs via `gh api`. A follow-up notification with job details arrives shortly after — without blocking the initial alert.
+After pushing the initial failure notification, the plugin asynchronously fetches the names of failed jobs. A follow-up notification with job details arrives shortly after — without blocking the initial alert.
 
 ### Deduplication
 
-GitHub occasionally retries webhook delivery. The plugin tracks the last 100 delivery IDs to prevent duplicate notifications.
+Forges occasionally retry webhook delivery. The plugin tracks the last 100 delivery IDs to prevent duplicate notifications. For GitLab, a synthetic delivery ID (`gitlab-{project_id}-{pipeline_id}-{status}`) ensures different pipeline state transitions aren't suppressed.
 
 ### Filtering
 
-- **Repository allowlist**: Only receive notifications from repos you care about
-- **Workflow filter**: Only monitor specific workflows (e.g., just `CI`, not `Lint`)
+- **Repository allowlist** (`--repos`): Only receive notifications from repos you care about
+- **Workflow filter** (`--workflow-filter`): Only monitor specific workflows
 
 ## Security
 
-This plugin was designed with security as a priority:
-
-- **HMAC-SHA256 signature validation** — Every webhook payload is verified against the shared secret using timing-safe comparison. Invalid signatures are rejected with 403.
-- **Localhost-only binding** — The HTTP server binds to `127.0.0.1` only. No external network access.
-- **Repository allowlist** — Optional `GITHUB_REPOS` restricts which repos can push events.
-- **Prompt injection prevention** — All user-controlled fields (commit messages, branch names, workflow names, author names) are sanitized before being included in notifications:
-  - HTML entities escaped (`<` to `&lt;`, `>` to `&gt;`)
-  - Control characters stripped
-  - Fields truncated to safe maximum lengths
-- **Deduplication** — Prevents replay of duplicate webhook deliveries.
+- **Signature validation** — Every webhook payload is verified:
+  - GitHub/Gitea: HMAC-SHA256 with timing-safe comparison
+  - GitLab: Token comparison with timing-safe comparison
+- **Localhost-only binding** — The HTTP server binds to `127.0.0.1` only
+- **Repository allowlist** — Optional `--repos` restricts which repos can push events
+- **Prompt injection prevention** — All user-controlled fields sanitized before inclusion in notifications
+- **Deduplication** — Prevents replay of duplicate webhook deliveries
 
 ## Troubleshooting
 
 ### No notifications arriving
 
-1. Verify `SMEE_URL` is set — the plugin auto-spawns smee-client
-2. Check your webhook secret matches between GitHub and your `.env`
-3. Confirm the webhook is configured for **"Workflow runs"** events in GitHub
+1. Check that the plugin sent a setup notification on startup (with URL and secret)
+2. Verify the webhook URL and secret match between your forge and the plugin
+3. Confirm the correct events are enabled (Workflow runs for GitHub/Gitea, Pipeline events for GitLab)
 4. Verify the MCP server is registered in `.mcp.json`
 
-### Port already in use
+### Multiple Claude sessions
 
-Set a different port:
-```env
-PORT=9999
-```
+The plugin defaults to port 0 (OS-assigned random port), so multiple sessions can run concurrently without port conflicts. Each session auto-provisions its own smee channel.
 
-### gh CLI errors
+### CLI tool errors
 
-Startup reconciliation and job enrichment require `gh` to be installed and authenticated (`gh auth login`). If `gh` is unavailable, the plugin logs a warning to stderr and continues — live webhook notifications still work fine.
+Startup reconciliation and job enrichment are best-effort:
+- **GitHub**: Requires `gh` CLI installed and authenticated
+- **GitLab**: Requires `glab` CLI installed and authenticated
+- **Gitea**: Requires `--gitea-url` configured
 
-### smee-client not starting
-
-The plugin spawns smee-client via `npx smee-client`. Make sure `npx` is available (it ships with Node.js).
+If the CLI/API is unavailable, the plugin logs a warning and continues — live webhook notifications still work.
 
 ## Development
 
 ```bash
 npm install          # Install dependencies
-npm test             # Run all tests (Node.js built-in test runner)
-npx tsx server.ts    # Start the server locally
-```
-
-### Testing with curl
-
-Generate a signed test payload and send it to your local server:
-
-```bash
-SECRET="your-test-secret"
-PAYLOAD='{"action":"completed","workflow_run":{"id":1,"name":"CI","head_branch":"main","head_sha":"abc123","html_url":"http://example.com","conclusion":"failure","head_commit":{"message":"test commit","author":{"name":"dev"}}},"repository":{"full_name":"owner/repo"}}'
-SIGNATURE="sha256=$(echo -n "$PAYLOAD" | openssl dgst -sha256 -hmac "$SECRET" | cut -d' ' -f2)"
-
-curl -X POST http://localhost:8789/webhook/github \
-  -H "X-Hub-Signature-256: $SIGNATURE" \
-  -H "X-GitHub-Event: workflow_run" \
-  -H "X-GitHub-Delivery: test-$(date +%s)" \
-  -d "$PAYLOAD"
+npm test             # Run all tests (170 tests across 11 files)
+npx tsx server.ts    # Start the server
 ```
 
 ### Project Structure
 
 ```
-server.ts                  # MCP server entry point — HTTP server, smee-client, reconciliation
+server.ts                  # MCP server entry point — HTTP, smee, bootstrap, reconciliation
 lib/
-  config.ts                # Configuration loader (.env file + environment variables)
+  forge.ts                 # Forge interface definition
+  forges/
+    github.ts              # GitHub Actions forge implementation
+    gitlab.ts              # GitLab CI forge implementation
+    gitea.ts               # Gitea Actions forge implementation
+  config.ts                # Configuration loader (CLI args + env vars + .env file)
+  bootstrap.ts             # First-run auto-provisioning (secret, smee, notification)
   handler.ts               # Webhook handler pipeline (validate → dedup → filter → notify)
-  webhook.ts               # GitHub webhook parsing, signature validation, deduplication
+  webhook.ts               # WebhookEvent type, deduplication, filtering
   notify.ts                # Notification formatting and sanitization
-  reconcile.ts             # Startup reconciliation and async job enrichment
+  reconcile.ts             # Startup reconciliation orchestration
 tests/
-  webhook.test.ts          # Signature validation, event parsing, deduplication
+  forges/
+    gitlab.test.ts         # GitLab forge unit tests
+    gitea.test.ts          # Gitea forge unit tests
+  webhook.test.ts          # GitHub forge + shared webhook tests
   notify.test.ts           # Sanitization, formatting
-  config.test.ts           # Config loading
-  reconcile.test.ts        # Job fetching, reconciliation
-  integration.test.ts      # Full HTTP pipeline end-to-end
+  config.test.ts           # Config loading, CLI args, precedence
+  bootstrap.test.ts        # Auto-provisioning with injected deps
+  reconcile.test.ts        # Reconciliation, job enrichment
+  integration.test.ts      # GitHub HTTP pipeline end-to-end
+  integration-gitlab.test.ts  # GitLab HTTP pipeline end-to-end
+  integration-gitea.test.ts   # Gitea HTTP pipeline end-to-end
   stdio-lifecycle.test.ts  # MCP stdio stability regression test
-  fixtures/                # Sample GitHub webhook payloads
+  fixtures/                # Sample webhook payloads per forge
 ```
 
 ### Development with Codev
 
-This project uses [Codev](https://github.com/cluesmith/codev) for AI-assisted development. Codev provides structured protocols for building software with AI agents, including multi-model consultation at every checkpoint.
-
-Each feature follows the **three-document model**:
-- **Specification** (`codev/specs/`) — What to build and why
-- **Plan** (`codev/plans/`) — How to build it, in testable phases
-- **Review** (`codev/reviews/`) — What was learned, deviations from plan, consultation feedback
-
-The project's architectural knowledge lives in:
-- **Architecture** (`codev/resources/arch.md`) — System design, data flow, components
-- **Lessons Learned** (`codev/resources/lessons-learned.md`) — Accumulated insights from reviews
-
-For larger contributions, PRs that include Codev artifacts (spec, plan, review) are significantly easier to integrate. See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
-
-See `CLAUDE.md` for Claude Code-specific instructions and `AGENTS.md` for cross-tool AI agent compatibility (Cursor, GitHub Copilot, etc.).
-
-## Architecture
-
-The plugin is structured as a pipeline with clear separation of concerns:
-
-1. **Config** (`lib/config.ts`) — Loads settings from `~/.claude/channels/ci/.env` and environment variables. Environment variables take precedence.
-
-2. **Webhook Parsing** (`lib/webhook.ts`) — Validates HMAC-SHA256 signatures, parses `workflow_run` events, manages deduplication with a bounded set (100 entries).
-
-3. **Handler** (`lib/handler.ts`) — Orchestrates the pipeline: signature check, dedup, parse, repo filter, workflow filter, format, push. Returns HTTP responses.
-
-4. **Notification** (`lib/notify.ts`) — Sanitizes all user-controlled input and formats channel notifications with structured metadata.
-
-5. **Reconciliation** (`lib/reconcile.ts`) — On startup, checks configured branches for recent failures via `gh run list`. Also provides async job name enrichment via `gh api`.
-
-6. **Server** (`server.ts`) — Wires everything together: starts the MCP server, HTTP server, smee-client subprocess, and delayed startup reconciliation.
+This project uses [Codev](https://github.com/cluesmith/codev) for AI-assisted development. See `CLAUDE.md` for instructions and `AGENTS.md` for cross-tool AI agent compatibility.
 
 ## License
 

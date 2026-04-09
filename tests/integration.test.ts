@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { createWebhookHandler } from '../lib/handler.js'
 import { clearDedup } from '../lib/webhook.js'
+import { githubForge } from '../lib/forges/github.js'
 import type { Config } from '../lib/config.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -30,12 +31,15 @@ function createMockMcp() {
 }
 
 const testConfig: Config = {
+  forge: 'github',
   webhookSecret: SECRET,
   port: 0,
   smeeUrl: null,
-  githubRepos: null,
+  repos: null,
   workflowFilter: null,
   reconcileBranches: ['ci', 'develop'],
+  giteaUrl: null,
+  giteaToken: null,
 }
 
 function readBody(req: IncomingMessage): Promise<string> {
@@ -49,12 +53,12 @@ function readBody(req: IncomingMessage): Promise<string> {
 
 // Start a real HTTP server with the handler for integration testing
 const mockMcp = createMockMcp()
-const handleWebhook = createWebhookHandler(testConfig, mockMcp as any)
+const handleWebhook = createWebhookHandler(testConfig, mockMcp as any, githubForge)
 
 const testServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
   try {
     const url = new URL(req.url ?? '/', `http://127.0.0.1`)
-    if (req.method === 'POST' && url.pathname === '/webhook/github') {
+    if (req.method === 'POST' && (url.pathname === '/webhook/github' || url.pathname === '/webhook')) {
       const body = await readBody(req)
       const headers = new Headers()
       for (const [key, value] of Object.entries(req.headers)) {
@@ -79,8 +83,8 @@ await new Promise<void>(resolve => testServer.listen(0, '127.0.0.1', resolve))
 const addr = testServer.address() as { port: number }
 const BASE_URL = `http://127.0.0.1:${addr.port}`
 
-async function postWebhook(payload: string, headers: Record<string, string> = {}): Promise<Response> {
-  return fetch(`${BASE_URL}/webhook/github`, {
+async function postWebhook(payload: string, headers: Record<string, string> = {}, path = '/webhook/github'): Promise<Response> {
+  return fetch(`${BASE_URL}${path}`, {
     method: 'POST',
     body: payload,
     headers: {
@@ -113,7 +117,6 @@ describe('integration: HTTP webhook pipeline', () => {
     assert.strictEqual(res.status, 200)
     assert.strictEqual(await res.text(), 'ok')
 
-    // Verify mcp.notification was called
     assert.ok(mockMcp.notifications.length >= 1)
     const notif = mockMcp.notifications[0]
     assert.strictEqual(notif.method, 'notifications/claude/channel')
@@ -175,7 +178,6 @@ describe('integration: HTTP webhook pipeline', () => {
     })
 
     assert.strictEqual(res.status, 200)
-    // All completed workflow runs push notifications — conclusion field lets the receiver decide
     assert.ok(mockMcp.notifications.length >= 1)
     const notif = mockMcp.notifications[0]
     assert.strictEqual(notif.params.meta.conclusion, 'success')
@@ -205,24 +207,19 @@ describe('integration: HTTP webhook pipeline', () => {
       'x-github-delivery': 'dup-delivery-1',
     }
 
-    // First request
     const res1 = await postWebhook(payload, headers)
     assert.strictEqual(res1.status, 200)
     const countAfterFirst = mockMcp.notifications.length
 
-    // Second request with same delivery ID
     const res2 = await postWebhook(payload, headers)
     assert.strictEqual(res2.status, 200)
-
-    // Should not have pushed an additional notification
     assert.strictEqual(mockMcp.notifications.length, countAfterFirst)
   })
 
   test('repo not in allowlist → 200, no notification', async () => {
-    // Create handler with restrictive allowlist
     const restrictedMcp = createMockMcp()
-    const restrictedConfig = { ...testConfig, githubRepos: ['other/repo'] }
-    const restrictedHandler = createWebhookHandler(restrictedConfig, restrictedMcp as any)
+    const restrictedConfig: Config = { ...testConfig, repos: ['other/repo'] }
+    const restrictedHandler = createWebhookHandler(restrictedConfig, restrictedMcp as any, githubForge)
 
     const restrictedServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
       try {
@@ -275,5 +272,19 @@ describe('integration: HTTP webhook pipeline', () => {
   test('404 for non-webhook routes', async () => {
     const res = await fetch(`${BASE_URL}/other/route`)
     assert.strictEqual(res.status, 404)
+  })
+
+  test('/webhook route works as alias', async () => {
+    const payload = readFileSync(join(fixtureDir, 'workflow-run-failure.json'), 'utf-8')
+    const signature = sign(payload)
+
+    const res = await postWebhook(payload, {
+      'x-hub-signature-256': signature,
+      'x-github-event': 'workflow_run',
+      'x-github-delivery': 'int-test-alias',
+    }, '/webhook')
+
+    assert.strictEqual(res.status, 200)
+    assert.ok(mockMcp.notifications.length >= 1)
   })
 })

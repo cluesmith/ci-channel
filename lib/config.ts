@@ -1,14 +1,21 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
+import { loadState } from './state.js'
+
+export const VALID_FORGES = ['github', 'gitlab', 'gitea'] as const
+export type ForgeName = (typeof VALID_FORGES)[number]
 
 export interface Config {
-  webhookSecret: string
+  forge: ForgeName
+  webhookSecret: string | null
   port: number
   smeeUrl: string | null
-  githubRepos: string[] | null
+  repos: string[] | null
   workflowFilter: string[] | null
   reconcileBranches: string[]
+  giteaUrl: string | null
+  giteaToken: string | null
 }
 
 function parseEnvFile(path: string): Record<string, string> {
@@ -44,37 +51,95 @@ function splitCommaList(value: string | undefined): string[] | null {
 
 export const DEFAULT_ENV_PATH = join(homedir(), '.claude', 'channels', 'ci', '.env')
 
-export function loadConfig(envFilePath?: string): Config {
+/**
+ * Parse CLI args from argv (process.argv.slice(2)).
+ * Supports --flag value pairs. Unknown flags throw.
+ */
+function parseCliArgs(argv: string[]): Record<string, string> {
+  const args: Record<string, string> = {}
+  const knownFlags = new Set([
+    '--forge', '--repos', '--port', '--workflow-filter',
+    '--reconcile-branches', '--gitea-url', '--smee-url',
+  ])
+
+  let i = 0
+  while (i < argv.length) {
+    const flag = argv[i]
+    if (!flag.startsWith('--')) {
+      throw new Error(`Unexpected argument: ${flag}. All arguments must be --flag value pairs.`)
+    }
+    if (!knownFlags.has(flag)) {
+      throw new Error(`Unknown flag: ${flag}. Valid flags: ${[...knownFlags].join(', ')}`)
+    }
+    const value = argv[i + 1]
+    if (value === undefined || value.startsWith('--')) {
+      throw new Error(`Missing value for flag: ${flag}`)
+    }
+    args[flag] = value
+    i += 2
+  }
+
+  return args
+}
+
+export function loadConfig(envFilePath?: string, argv?: string[], statePath?: string): Config {
   const envPath = envFilePath ?? DEFAULT_ENV_PATH
   const fileEnv = parseEnvFile(envPath)
+  const cliArgs = parseCliArgs(argv ?? process.argv.slice(2))
 
-  // process.env takes precedence over file
-  const get = (key: string): string | undefined => process.env[key] ?? fileEnv[key]
+  // Load persisted state (auto-provisioned values) as lowest priority
+  const state = loadState(statePath)
 
-  const webhookSecret = get('WEBHOOK_SECRET')
-  if (!webhookSecret) {
+  // Precedence: CLI args > env vars > .env file > state.json
+  const get = (key: string, cliFlag?: string, stateKey?: string): string | undefined => {
+    if (cliFlag && cliArgs[cliFlag] !== undefined) return cliArgs[cliFlag]
+    const envVal = process.env[key] ?? fileEnv[key]
+    if (envVal !== undefined) return envVal
+    if (stateKey && state[stateKey as keyof typeof state]) return state[stateKey as keyof typeof state]
+    return undefined
+  }
+
+  // Forge selection
+  const forgeStr = get('FORGE', '--forge') ?? 'github'
+  if (!VALID_FORGES.includes(forgeStr as ForgeName)) {
     throw new Error(
-      'WEBHOOK_SECRET is required. Set it in ~/.claude/channels/ci/.env or as an environment variable.'
+      `Invalid FORGE value: "${forgeStr}". Must be one of: ${VALID_FORGES.join(', ')}`
     )
   }
+  const forge = forgeStr as ForgeName
 
-  const portStr = get('PORT')
-  const port = portStr ? Number(portStr) : 8789
+  // Webhook secret — null means auto-generate in bootstrap
+  const webhookSecret = get('WEBHOOK_SECRET', undefined, 'webhookSecret') ?? null
+
+  // Port — default 0 (OS-assigned)
+  const portStr = get('PORT', '--port')
+  const port = portStr ? Number(portStr) : 0
   if (!Number.isInteger(port) || port < 0 || port > 65535) {
-    throw new Error(`Invalid PORT value: ${portStr}. Must be an integer between 1 and 65535.`)
+    throw new Error(`Invalid PORT value: ${portStr}. Must be an integer between 0 and 65535.`)
   }
 
-  const reconcileBranchesStr = get('RECONCILE_BRANCHES')
+  // Repos — CLI --repos > REPOS env > GITHUB_REPOS env (backward compat)
+  const reposFromCli = cliArgs['--repos']
+  const reposStr = reposFromCli ?? process.env.REPOS ?? fileEnv.REPOS ?? process.env.GITHUB_REPOS ?? fileEnv.GITHUB_REPOS
+  const repos = splitCommaList(reposStr)
+
+  // Smee URL — CLI > env > .env > state.json
+  const smeeUrl = get('SMEE_URL', '--smee-url', 'smeeUrl') ?? null
+
+  const reconcileBranchesStr = get('RECONCILE_BRANCHES', '--reconcile-branches')
   const reconcileBranches = reconcileBranchesStr
     ? reconcileBranchesStr.split(',').map(s => s.trim()).filter(Boolean)
     : ['ci', 'develop']
 
   return {
+    forge,
     webhookSecret,
     port,
-    smeeUrl: get('SMEE_URL') ?? null,
-    githubRepos: splitCommaList(get('GITHUB_REPOS')),
-    workflowFilter: splitCommaList(get('WORKFLOW_FILTER')),
+    smeeUrl,
+    repos,
+    workflowFilter: splitCommaList(get('WORKFLOW_FILTER', '--workflow-filter')),
     reconcileBranches,
+    giteaUrl: get('GITEA_URL', '--gitea-url') ?? null,
+    giteaToken: get('GITEA_TOKEN') ?? null,
   }
 }

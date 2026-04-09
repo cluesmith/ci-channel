@@ -1,29 +1,20 @@
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import type { Config } from './config.js'
-import { validateSignature, parseWebhookEvent, isDuplicate, isRepoAllowed, isWorkflowAllowed } from './webhook.js'
+import type { Forge } from './forge.js'
+import { isDuplicate, isRepoAllowed, isWorkflowAllowed } from './webhook.js'
 import { formatNotification, pushNotification, sanitize } from './notify.js'
-import { fetchFailedJobs } from './reconcile.js'
 
-export function createWebhookHandler(config: Config, mcp: Server) {
+export function createWebhookHandler(config: Config, mcp: Server, forge: Forge) {
   return async function handleWebhook(req: Request): Promise<Response> {
-    const signature = req.headers.get('x-hub-signature-256')
-    const eventType = req.headers.get('x-github-event')
-    const deliveryId = req.headers.get('x-github-delivery')
-
     const body = await req.text()
 
-    // Step 1: Validate signature
-    if (!validateSignature(body, signature, config.webhookSecret)) {
+    // Step 1: Validate signature using forge-specific logic
+    if (!config.webhookSecret || !forge.validateSignature(body, req.headers, config.webhookSecret)) {
       return new Response('Invalid signature', { status: 403 })
     }
 
-    // Step 2: Check for duplicate delivery
-    if (deliveryId && isDuplicate(deliveryId)) {
-      return new Response('ok')
-    }
-
-    // Step 3: Parse the event
-    const result = parseWebhookEvent(eventType, deliveryId, body)
+    // Step 2: Parse the event using forge-specific logic
+    const result = forge.parseWebhookEvent(req.headers, body)
 
     if (result.type === 'malformed') {
       return new Response(result.reason, { status: 400 })
@@ -35,8 +26,13 @@ export function createWebhookHandler(config: Config, mcp: Server) {
 
     const { event } = result
 
+    // Step 3: Check for duplicate delivery
+    if (isDuplicate(event.deliveryId)) {
+      return new Response('ok')
+    }
+
     // Step 4: Check repo allowlist
-    if (!isRepoAllowed(event.repoFullName, config.githubRepos)) {
+    if (!isRepoAllowed(event.repoFullName, config.repos)) {
       return new Response('ok')
     }
 
@@ -51,7 +47,7 @@ export function createWebhookHandler(config: Config, mcp: Server) {
 
     // Step 7: Async enrichment — fire-and-forget, never blocks the response
     if (event.repoFullName && event.runId) {
-      fetchFailedJobs(event.repoFullName, event.runId).then(jobs => {
+      forge.fetchFailedJobs(config, event.repoFullName, event.runId).then(jobs => {
         if (jobs && jobs.length > 0) {
           const sanitizedWorkflow = sanitize(event.workflowName, 200)
           const sanitizedJobs = jobs.map(j => sanitize(j, 200)).join(', ')
