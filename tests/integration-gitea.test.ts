@@ -169,7 +169,7 @@ describe('integration: Gitea webhook pipeline', () => {
     assert.strictEqual(mockMcp.notifications.length, 0)
   })
 
-  test('non-completed action → 200, no notification', async () => {
+  test('non-completed action → 200, notification', async () => {
     const payload = readFileSync(join(fixtureDir, 'gitea-workflow-run-failure.json'), 'utf-8')
     const modified = payload.replace('"completed"', '"requested"')
     const signature = sign(modified)
@@ -186,6 +186,6 @@ describe('integration: Gitea webhook pipeline', () => {
     })
 
     assert.strictEqual(res.status, 200)
-    assert.strictEqual(mockMcp.notifications.length, 0)
+    assert.strictEqual(mockMcp.notifications.length, 1)
   })
 })

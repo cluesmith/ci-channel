@@ -49,33 +49,42 @@ export const githubForge: Forge = {
       return { type: 'irrelevant' }
     }
 
-    if (payload.action !== 'completed') {
-      return { type: 'irrelevant' }
-    }
-
     const run = payload.workflow_run
-    if (!run || typeof run !== 'object') {
-      return { type: 'malformed', reason: 'Missing workflow_run field' }
-    }
-
     const repo = payload.repository
-    if (!repo || typeof repo !== 'object' || typeof repo.full_name !== 'string') {
-      return { type: 'malformed', reason: 'Missing repository.full_name' }
+
+    // If we have a workflow_run payload, pass it through regardless of action
+    if (run && typeof run === 'object' && repo && typeof repo === 'object' && typeof repo.full_name === 'string') {
+      return {
+        type: 'event',
+        event: {
+          deliveryId: deliveryId ?? 'unknown',
+          workflowName: run.name ?? 'unknown',
+          conclusion: run.conclusion ?? payload.action ?? 'unknown',
+          branch: run.head_branch ?? 'unknown',
+          commitSha: run.head_sha ?? 'unknown',
+          commitMessage: run.head_commit?.message ?? null,
+          commitAuthor: run.head_commit?.author?.name ?? null,
+          runUrl: run.html_url ?? '',
+          runId: run.id ?? 0,
+          repoFullName: repo.full_name,
+        },
+      }
     }
 
+    // Minimal payload — still pass through with whatever we can extract
     return {
       type: 'event',
       event: {
         deliveryId: deliveryId ?? 'unknown',
-        workflowName: run.name ?? 'unknown',
-        conclusion: run.conclusion ?? 'unknown',
-        branch: run.head_branch ?? 'unknown',
-        commitSha: run.head_sha ?? 'unknown',
-        commitMessage: run.head_commit?.message ?? null,
-        commitAuthor: run.head_commit?.author?.name ?? null,
-        runUrl: run.html_url ?? '',
-        runId: run.id ?? 0,
-        repoFullName: repo.full_name,
+        workflowName: run?.name ?? 'unknown',
+        conclusion: payload.action ?? 'unknown',
+        branch: run?.head_branch ?? 'unknown',
+        commitSha: run?.head_sha ?? 'unknown',
+        commitMessage: run?.head_commit?.message ?? null,
+        commitAuthor: run?.head_commit?.author?.name ?? null,
+        runUrl: run?.html_url ?? '',
+        runId: run?.id ?? 0,
+        repoFullName: repo?.full_name ?? 'unknown',
       },
     }
   },

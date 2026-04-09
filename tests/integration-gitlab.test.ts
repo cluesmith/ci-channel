@@ -159,7 +159,7 @@ describe('integration: GitLab webhook pipeline', () => {
     assert.strictEqual(mockMcp.notifications.length, 0)
   })
 
-  test('running pipeline state → 200, no notification', async () => {
+  test('running pipeline state → 200, notification', async () => {
     const payload = readFileSync(join(fixtureDir, 'gitlab-pipeline-failure.json'), 'utf-8')
     const modified = payload.replace('"failed"', '"running"')
 
@@ -174,7 +174,9 @@ describe('integration: GitLab webhook pipeline', () => {
     })
 
     assert.strictEqual(res.status, 200)
-    assert.strictEqual(mockMcp.notifications.length, 0)
+    assert.strictEqual(mockMcp.notifications.length, 1)
+    const notif = mockMcp.notifications[0]
+    assert.strictEqual(notif.params.meta.conclusion, 'running')
   })
 
   test('repo allowlist works with nested namespaces', async () => {

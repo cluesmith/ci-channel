@@ -137,13 +137,13 @@ describe('giteaForge.parseWebhookEvent', () => {
     }
   })
 
-  test('returns irrelevant for non-completed action', () => {
+  test('returns event for non-completed action', () => {
     const body = makeWorkflowRunPayload({ action: 'requested' })
     const result = giteaForge.parseWebhookEvent(
       makeHeaders({ 'x-gitea-event': 'workflow_run', 'x-gitea-delivery': 'gitea-del-3' }),
       body,
     )
-    assert.strictEqual(result.type, 'irrelevant')
+    assert.strictEqual(result.type, 'event')
   })
 
   test('returns irrelevant for non-workflow_run event', () => {
@@ -167,15 +167,19 @@ describe('giteaForge.parseWebhookEvent', () => {
     assert.strictEqual(result.type, 'malformed')
   })
 
-  test('returns malformed for missing workflow_run', () => {
+  test('passes through missing workflow_run with fallbacks', () => {
     const result = giteaForge.parseWebhookEvent(
       makeHeaders({ 'x-gitea-event': 'workflow_run' }),
       '{"action": "completed"}',
     )
-    assert.strictEqual(result.type, 'malformed')
+    assert.strictEqual(result.type, 'event')
+    if (result.type === 'event') {
+      assert.strictEqual(result.event.conclusion, 'completed')
+      assert.strictEqual(result.event.repoFullName, 'unknown')
+    }
   })
 
-  test('returns malformed for missing repository.full_name', () => {
+  test('passes through missing repository.full_name with fallback', () => {
     const body = JSON.stringify({
       action: 'completed',
       workflow_run: { id: 1, conclusion: 'failure' },
@@ -185,7 +189,8 @@ describe('giteaForge.parseWebhookEvent', () => {
       makeHeaders({ 'x-gitea-event': 'workflow_run' }),
       body,
     )
-    assert.strictEqual(result.type, 'malformed')
+    assert.strictEqual(result.type, 'event')
+    if (result.type === 'event') assert.strictEqual(result.event.repoFullName, 'unknown')
   })
 
   test('handles missing head_commit gracefully', () => {

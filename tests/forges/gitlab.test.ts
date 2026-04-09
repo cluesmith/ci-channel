@@ -179,31 +179,34 @@ describe('gitlabForge.parseWebhookEvent', () => {
     assert.strictEqual(result.type, 'event')
   })
 
-  test('rejects running non-terminal state', () => {
+  test('passes through running state', () => {
     const body = makePipelinePayload({ object_attributes: { status: 'running' } })
     const result = gitlabForge.parseWebhookEvent(
       makeHeaders({ 'x-gitlab-event': 'Pipeline Hook' }),
       body,
     )
-    assert.strictEqual(result.type, 'irrelevant')
+    assert.strictEqual(result.type, 'event')
+    if (result.type === 'event') assert.strictEqual(result.event.conclusion, 'running')
   })
 
-  test('rejects pending non-terminal state', () => {
+  test('passes through pending state', () => {
     const body = makePipelinePayload({ object_attributes: { status: 'pending' } })
     const result = gitlabForge.parseWebhookEvent(
       makeHeaders({ 'x-gitlab-event': 'Pipeline Hook' }),
       body,
     )
-    assert.strictEqual(result.type, 'irrelevant')
+    assert.strictEqual(result.type, 'event')
+    if (result.type === 'event') assert.strictEqual(result.event.conclusion, 'pending')
   })
 
-  test('rejects created non-terminal state', () => {
+  test('passes through created state', () => {
     const body = makePipelinePayload({ object_attributes: { status: 'created' } })
     const result = gitlabForge.parseWebhookEvent(
       makeHeaders({ 'x-gitlab-event': 'Pipeline Hook' }),
       body,
     )
-    assert.strictEqual(result.type, 'irrelevant')
+    assert.strictEqual(result.type, 'event')
+    if (result.type === 'event') assert.strictEqual(result.event.conclusion, 'created')
   })
 
   test('rejects non-pipeline events', () => {

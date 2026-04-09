@@ -50,11 +50,6 @@ export const gitlabForge: Forge = {
       return { type: 'malformed', reason: 'Missing object_attributes' }
     }
 
-    // Only terminal pipeline states generate notifications
-    if (!TERMINAL_STATES.has(attrs.status)) {
-      return { type: 'irrelevant' }
-    }
-
     const project = payload.project
     if (!project || typeof project !== 'object' || typeof project.path_with_namespace !== 'string') {
       return { type: 'malformed', reason: 'Missing project.path_with_namespace' }

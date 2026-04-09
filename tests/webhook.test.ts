@@ -104,13 +104,13 @@ describe('githubForge.parseWebhookEvent', () => {
     }
   })
 
-  test('returns irrelevant for non-completed action', () => {
+  test('returns event for non-completed action', () => {
     const body = JSON.stringify({ action: 'requested', workflow_run: { conclusion: 'failure' }, repository: { full_name: 'o/r' } })
     const result = githubForge.parseWebhookEvent(
       makeHeaders({ 'x-github-event': 'workflow_run', 'x-github-delivery': 'delivery-3' }),
       body,
     )
-    assert.strictEqual(result.type, 'irrelevant')
+    assert.strictEqual(result.type, 'event')
   })
 
   test('returns irrelevant for non-workflow_run event with valid JSON', () => {
@@ -153,15 +153,19 @@ describe('githubForge.parseWebhookEvent', () => {
     assert.strictEqual(result.type, 'malformed')
   })
 
-  test('returns malformed for missing workflow_run', () => {
+  test('passes through missing workflow_run with fallbacks', () => {
     const result = githubForge.parseWebhookEvent(
       makeHeaders({ 'x-github-event': 'workflow_run', 'x-github-delivery': 'delivery-8' }),
       '{"action": "completed"}',
     )
-    assert.strictEqual(result.type, 'malformed')
+    assert.strictEqual(result.type, 'event')
+    if (result.type === 'event') {
+      assert.strictEqual(result.event.conclusion, 'completed')
+      assert.strictEqual(result.event.repoFullName, 'unknown')
+    }
   })
 
-  test('returns malformed for missing repository.full_name', () => {
+  test('passes through missing repository.full_name with fallback', () => {
     const body = JSON.stringify({
       action: 'completed',
       workflow_run: { conclusion: 'failure', id: 1, name: 'test' },
@@ -171,7 +175,8 @@ describe('githubForge.parseWebhookEvent', () => {
       makeHeaders({ 'x-github-event': 'workflow_run', 'x-github-delivery': 'delivery-9' }),
       body,
     )
-    assert.strictEqual(result.type, 'malformed')
+    assert.strictEqual(result.type, 'event')
+    if (result.type === 'event') assert.strictEqual(result.event.repoFullName, 'unknown')
   })
 
   test('handles missing head_commit gracefully', () => {
