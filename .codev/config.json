@@ -1,6 +1,6 @@
 {
   "shell": {
-    "architect": "claude --dangerously-skip-permissions",
+    "architect": "claude --dangerously-skip-permissions --plugin-dir /Users/mwk/Development/cluesmith/ci-channel --dangerously-load-development-channels server:ci",
     "builder": "claude --dangerously-skip-permissions",
     "shell": "bash"
   }

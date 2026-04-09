@@ -42,27 +42,13 @@ cd ci-channel
 npm install
 ```
 
-### 2. Register the MCP server
-
-Add to your project's `.mcp.json` (or `~/.claude/.mcp.json` for global):
-
-```json
-{
-  "mcpServers": {
-    "ci": {
-      "command": "npx",
-      "args": ["tsx", "server.ts"],
-      "cwd": "/absolute/path/to/ci-channel"
-    }
-  }
-}
-```
-
-### 3. Start Claude Code
+### 2. Start Claude Code with the channel plugin
 
 ```bash
-claude
+claude --plugin-dir /absolute/path/to/ci-channel --dangerously-load-development-channels server:ci
 ```
+
+The plugin ships its own `.mcp.json`, so no manual server registration is needed.
 
 On first run, the plugin:
 1. Generates a `WEBHOOK_SECRET` and provisions a smee.io relay channel
@@ -86,17 +72,9 @@ That's it. No `.env` file to create manually, no browser visit to smee.io.
 
 ### GitHub Actions
 
-**`.mcp.json` configuration:**
-```json
-{
-  "mcpServers": {
-    "ci": {
-      "command": "npx",
-      "args": ["tsx", "server.ts"],
-      "cwd": "/path/to/ci-channel"
-    }
-  }
-}
+**Launch:**
+```bash
+claude --plugin-dir /path/to/ci-channel --dangerously-load-development-channels server:ci
 ```
 
 No `--forge` flag needed — GitHub is the default.
@@ -121,17 +99,9 @@ WEBHOOK_SECRET=your-webhook-secret
 
 ### GitLab CI
 
-**`.mcp.json` configuration:**
-```json
-{
-  "mcpServers": {
-    "ci": {
-      "command": "npx",
-      "args": ["tsx", "server.ts", "--forge", "gitlab", "--repos", "group/project"],
-      "cwd": "/path/to/ci-channel"
-    }
-  }
-}
+**Launch:**
+```bash
+claude --plugin-dir /path/to/ci-channel --dangerously-load-development-channels server:ci -- --forge gitlab --repos "group/project"
 ```
 
 For nested namespaces, use the exact `path_with_namespace` value: `--repos "group/subgroup/project"`.
@@ -155,17 +125,9 @@ WEBHOOK_SECRET=your-gitlab-secret-token
 
 ### Gitea Actions
 
-**`.mcp.json` configuration:**
-```json
-{
-  "mcpServers": {
-    "ci": {
-      "command": "npx",
-      "args": ["tsx", "server.ts", "--forge", "gitea", "--gitea-url", "https://your-gitea-instance.com", "--repos", "owner/repo"],
-      "cwd": "/path/to/ci-channel"
-    }
-  }
-}
+**Launch:**
+```bash
+claude --plugin-dir /path/to/ci-channel --dangerously-load-development-channels server:ci -- --forge gitea --gitea-url "https://your-gitea-instance.com" --repos "owner/repo"
 ```
 
 **Secrets** — Add to `~/.claude/channels/ci/.env`:
@@ -193,7 +155,7 @@ GITEA_TOKEN=your-gitea-api-token
 
 ## Configuration Reference
 
-Configuration uses CLI args in `.mcp.json` for structural settings, and `~/.claude/channels/ci/.env` for secrets. Auto-provisioned state (generated secret, smee URL) is persisted to `~/.claude/channels/ci/state.json`.
+Configuration uses CLI args (passed after `--` on the command line) for structural settings, and `~/.claude/channels/ci/.env` for secrets. Auto-provisioned state (generated secret, smee URL) is persisted to `~/.claude/channels/ci/state.json`.
 
 Precedence: CLI args > env vars > `.env` file > `state.json`.
 
@@ -233,39 +195,22 @@ All CLI args also accept env vars for backward compatibility:
 
 ### Example: Monitor specific repos and workflows
 
-```json
-{
-  "mcpServers": {
-    "ci": {
-      "command": "npx",
-      "args": [
-        "tsx", "server.ts",
-        "--repos", "myorg/api,myorg/frontend",
-        "--workflow-filter", "CI,Deploy to Production",
-        "--reconcile-branches", "main,develop"
-      ],
-      "cwd": "/path/to/ci-channel"
-    }
-  }
-}
+```bash
+claude --plugin-dir /path/to/ci-channel --dangerously-load-development-channels server:ci \
+  -- --repos "myorg/api,myorg/frontend" \
+     --workflow-filter "CI,Deploy to Production" \
+     --reconcile-branches "main,develop"
 ```
 
 ### Smee channel management
 
 By default, the plugin auto-provisions a smee.io channel on first run and persists it to `state.json`, so the same URL is reused across restarts. You only configure your forge webhook once.
 
-To use a manually provisioned channel instead (e.g., for shared team use), pass it via `--smee-url`:
+To use a manually provisioned channel instead (e.g., for shared team use), pass `--smee-url`:
 
-```json
-{
-  "mcpServers": {
-    "ci": {
-      "command": "npx",
-      "args": ["tsx", "server.ts", "--smee-url", "https://smee.io/your-channel"],
-      "cwd": "/path/to/ci-channel"
-    }
-  }
-}
+```bash
+claude --plugin-dir /path/to/ci-channel --dangerously-load-development-channels server:ci \
+  -- --smee-url "https://smee.io/your-channel"
 ```
 
 ## Features
@@ -307,7 +252,7 @@ Forges occasionally retry webhook delivery. The plugin tracks the last 100 deliv
 1. Check that the plugin sent a setup notification on startup (with URL and secret)
 2. Verify the webhook URL and secret match between your forge and the plugin
 3. Confirm the correct events are enabled (Workflow runs for GitHub/Gitea, Pipeline events for GitLab)
-4. Verify the MCP server is registered in `.mcp.json`
+4. Verify you launched with `--plugin-dir` and `--dangerously-load-development-channels server:ci`
 
 ### Multiple Claude sessions
 
