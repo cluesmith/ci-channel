@@ -33,6 +33,8 @@ Forge (GitHub/GitLab/Gitea)
 ## Zero-Config Quick Start
 
 > **NOTE:** Claude Channels is still a new feature so config is a bit complicated.
+>
+> **LLM agents**: See [INSTALL.md](INSTALL.md) for step-by-step installation instructions designed for AI agents to follow programmatically.
 
 The plugin auto-generates a webhook secret and provisions a smee.io relay on first run. You just need to:
 
@@ -70,7 +72,23 @@ CI channel ready. Configure your forge webhook:
 
 ### 4. Configure your forge webhook (one-time)
 
-Copy the URL and secret from the notification and paste them into your forge's webhook settings (see [Per-Forge Setup Guides](#per-forge-setup-guides) below).
+Copy the URL and secret from the notification and configure your forge's webhook. For GitHub, you can use the `gh` CLI:
+
+```bash
+gh api repos/OWNER/REPO/hooks --method POST --input - <<'EOF'
+{
+  "config": {
+    "url": "https://smee.io/YOUR_CHANNEL_URL",
+    "content_type": "json",
+    "secret": "YOUR_WEBHOOK_SECRET"
+  },
+  "events": ["workflow_run"],
+  "active": true
+}
+EOF
+```
+
+Or configure it manually in the GitHub UI (see [Per-Forge Setup Guides](#per-forge-setup-guides) below).
 
 That's it. No `.env` file to create manually, no browser visit to smee.io.
 
@@ -86,7 +104,23 @@ claude --dangerously-load-development-channels server:ci
 
 No `--forge` flag needed — GitHub is the default.
 
-**Webhook configuration** — Go to your GitHub repo: **Settings > Webhooks > Add webhook**
+**Webhook configuration** — Use the `gh` CLI or the GitHub UI:
+
+```bash
+gh api repos/OWNER/REPO/hooks --method POST --input - <<'EOF'
+{
+  "config": {
+    "url": "SMEE_URL_FROM_NOTIFICATION",
+    "content_type": "json",
+    "secret": "SECRET_FROM_NOTIFICATION"
+  },
+  "events": ["workflow_run"],
+  "active": true
+}
+EOF
+```
+
+Or manually: **Settings > Webhooks > Add webhook**
 
 | Field | Value |
 |-------|-------|
