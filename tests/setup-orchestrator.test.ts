@@ -2,7 +2,7 @@ import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import type { PluginState } from '../lib/state.js'
 import { runInstall, type InstallDeps, type Io } from '../lib/setup/orchestrator.js'
-import { SetupError } from '../lib/setup/errors.js'
+import { SetupError, UserDeclinedError } from '../lib/setup/errors.js'
 import type { GhHook } from '../lib/setup/gh.js'
 import type { McpJsonReadResult, McpJson } from '../lib/setup/mcp-json.js'
 import type { SetupArgs } from '../lib/setup/types.js'
@@ -332,6 +332,69 @@ describe('runInstall — webhook secret freshness vs existing hook (silent-HMAC-
       (err: SetupError) =>
         err instanceof SetupError &&
         err.userMessage.includes('matching hook without an id'),
+    )
+  })
+
+  test('architect regression: decline at PATCH prompt → state.json is NOT written (prevents silent-HMAC break on next run)', async () => {
+    // Scenario from the architect's iter2 bug report:
+    //   1. User deletes state.json, leaves webhook in place
+    //   2. Re-runs setup; installer generates fresh secret
+    //   3. Finds matching hook, prompts "Update webhook?"
+    //   4. User declines
+    //   5. BEFORE FIX: state.json was already written with the fresh
+    //      secret, so next run would see secretWasGenerated=false and
+    //      skip the PATCH as idempotent — silent HMAC break forever.
+    //   6. AFTER FIX: state.json is written AFTER the webhook step, so
+    //      declining throws UserDeclinedError with state.json still
+    //      empty. Next run re-enters the PATCH path correctly.
+    const { deps, calls } = buildMockDepsAndIo({
+      existingState: {
+        smeeUrl: 'https://smee.io/existing',
+        // No webhookSecret — installer must regenerate
+      },
+      ghHooks: [
+        { id: 42, config: { url: 'https://smee.io/existing' } },
+      ],
+    })
+
+    // Mock Io that declines the PATCH confirmation.
+    let confirmCount = 0
+    const decliningIo: Io = {
+      info: () => {},
+      warn: () => {},
+      confirm: async (message: string) => {
+        confirmCount++
+        // First and only prompt reached in this scenario is the
+        // "Update existing webhook?" — decline it.
+        assert.match(message, /Update existing webhook/)
+        return false
+      },
+      prompt: async () => {
+        throw new Error('prompt should not be called')
+      },
+    }
+
+    const args = baseArgs()
+    args.yes = false // interactive
+    await assert.rejects(
+      () => runInstall(args, deps, decliningIo),
+      (err: UserDeclinedError) =>
+        err instanceof UserDeclinedError &&
+        err.userMessage.includes('updating webhook secret') &&
+        err.exitCode === 0,
+    )
+
+    // Only the PATCH prompt was asked.
+    assert.equal(confirmCount, 1)
+    // Webhook PATCH was NOT called (user declined).
+    assert.equal(calls.ghUpdateHookCalls, 0)
+    // CRITICAL: state.json was NOT written. This is the bug fix —
+    // without it, the next run would see the freshly persisted secret
+    // and skip the PATCH path entirely, silently breaking HMAC validation.
+    assert.equal(
+      calls.writeStateCalls,
+      0,
+      'state.json must NOT be written when PATCH is declined — otherwise next run will skip the PATCH as idempotent and silently break HMAC',
     )
   })
 

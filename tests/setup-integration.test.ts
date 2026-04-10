@@ -20,7 +20,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { findProjectRoot } from '../lib/project-root.js'
 import type { PluginState } from '../lib/state.js'
 import { runInstall, type InstallDeps, type Io } from '../lib/setup/orchestrator.js'
@@ -272,6 +272,80 @@ describe('setup integration (real fs)', () => {
     )
     assert.deepEqual(mcp.mcpServers.other, { command: 'foo', args: ['bar'] })
     assert.deepEqual(mcp.mcpServers.ci, { ...CI_SERVER_ENTRY })
+  })
+
+  test('architect regression (iter2): decline at PATCH prompt → state.json not written on disk', async () => {
+    // End-to-end version of the orchestrator-level regression in
+    // setup-orchestrator.test.ts. Uses real filesystem + real
+    // writeStateForSetup. Pre-populates state.json with only smeeUrl
+    // (simulating the partial-state scenario), creates a matching
+    // hook, runs interactively with a declining Io, and asserts
+    // state.json still has no webhookSecret on disk after the run.
+    //
+    // The failure mode this locks out: state being written with a
+    // fresh secret BEFORE the PATCH confirmation, then the user
+    // declining — causing the next run to skip the PATCH as
+    // idempotent and silently break HMAC validation.
+    const statePath = stateFilePath(tmpRoot)
+    const stateDir = dirname(statePath)
+    mkdirSync(stateDir, { recursive: true })
+    writeFileSync(
+      statePath,
+      JSON.stringify({ smeeUrl: 'https://smee.io/partial' }, null, 2) + '\n',
+    )
+
+    const mock: TrackingMock = {
+      ghCreateHookCalls: 0,
+      ghCreateHookLastPayload: null,
+      ghUpdateHookCalls: 0,
+      ghUpdateHookLastPayload: null,
+      ghUpdateHookLastHookId: null,
+      ghListHooksResult: [
+        { id: 7, config: { url: 'https://smee.io/partial' } },
+      ],
+      fetchedSmeeUrl: null,
+    }
+    const deps = buildDeps(tmpRoot, mock)
+
+    const decliningIo = {
+      info: () => {},
+      warn: () => {},
+      confirm: async (message: string) => {
+        // The only prompt the orchestrator reaches in this scenario
+        // is "Update existing webhook..." — decline it.
+        if (message.includes('Update existing webhook')) return false
+        return true
+      },
+      prompt: async () => {
+        throw new Error('prompt should not be called')
+      },
+    }
+
+    await assert.rejects(
+      () =>
+        runInstall(
+          baseArgs({ yes: false }), // interactive so confirm is actually called
+          deps,
+          decliningIo,
+        ),
+      (err: Error) => err.name === 'UserDeclinedError',
+    )
+
+    // PATCH was NOT called.
+    assert.equal(mock.ghUpdateHookCalls, 0)
+
+    // state.json on disk still has ONLY smeeUrl — no webhookSecret.
+    // This is the critical assertion: if the installer had written
+    // state before the PATCH prompt (the iter2 bug), this file would
+    // now have a fresh secret, and the next run would silently skip
+    // the PATCH path.
+    const stateContent = JSON.parse(readFileSync(statePath, 'utf-8'))
+    assert.equal(
+      stateContent.webhookSecret,
+      undefined,
+      'state.json must not contain a webhookSecret after the user declines the PATCH prompt',
+    )
+    assert.equal(stateContent.smeeUrl, 'https://smee.io/partial')
   })
 
   test('dry-run: no state.json, no .mcp.json, no webhook POST', async () => {

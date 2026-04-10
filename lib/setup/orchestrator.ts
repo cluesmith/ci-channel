@@ -121,30 +121,8 @@ export async function runInstall(
   // --- Resolve smee URL (existing, --smee-url override, or provision) ---
   const smeeUrlChanged = await resolveSmeeUrl(args, state, deps, io)
 
-  // --- Write state.json (skipped in dry-run; skipped if unchanged) ---
-  const statePath = stateFilePath(projectRoot)
-  const stateChanged = stateDiffers(existingState, state)
-  if (args.dryRun) {
-    if (stateChanged) {
-      io.info(`[ci-channel setup] [dry-run] Would write ${statePath}`)
-    } else {
-      io.info(
-        `[ci-channel setup] [dry-run] state.json unchanged — would skip write`,
-      )
-    }
-  } else if (stateChanged) {
-    if (!(await io.confirm(`Write credentials to ${statePath}?`))) {
-      throw new UserDeclinedError('Stopped before writing state.json.')
-    }
-    deps.writeState(projectRoot, state)
-    io.info(`[ci-channel setup] Wrote ${statePath} (mode 0o600)`)
-  } else {
-    io.info(
-      `[ci-channel setup] state.json already has current values — skipping write`,
-    )
-  }
-
   // --- .gitignore warning ---
+  // Informational only; doesn't depend on any state being written.
   if (!deps.isGitignored(projectRoot, STATE_REL_PATH)) {
     io.warn(
       '[ci-channel setup] Warning: .claude/channels/ci/ is not in .gitignore — state.json contains a secret.',
@@ -163,7 +141,19 @@ export async function runInstall(
     (h) => h.config?.url === expectedSmeeUrl,
   )
 
-  // --- Create or update webhook ---
+  // --- Create or update webhook (BEFORE writing state.json) ---
+  //
+  // Ordering rule: the webhook must be reconciled with our intended
+  // secret BEFORE state.json is written. The naive ordering (state
+  // first, then webhook) has a silent race: if state persists a fresh
+  // secret and then the webhook step fails or the user declines the
+  // PATCH prompt, next run sees state.json already has a secret
+  // (`secretWasGenerated === false`), skips the PATCH as idempotent,
+  // and the GitHub webhook stays signed with the stale secret forever.
+  //
+  // By doing webhook work first, a decline/failure simply leaves the
+  // (possibly still-empty) state.json alone, and the next run detects
+  // the fresh-secret-needed case again correctly.
   //
   // There are three cases:
   //   (1) No matching hook → create one.
@@ -234,6 +224,32 @@ export async function runInstall(
   if (smeeUrlChanged) {
     io.warn(
       '[ci-channel setup] The old webhook for the previous smee URL is still in place. Delete it manually if no longer needed.',
+    )
+  }
+
+  // --- Write state.json (AFTER webhook is reconciled) ---
+  // Only reached when the webhook step succeeded (or was idempotently
+  // skipped). A failure or user decline above throws before reaching
+  // here, leaving state.json untouched so the next run can try again.
+  const statePath = stateFilePath(projectRoot)
+  const stateChanged = stateDiffers(existingState, state)
+  if (args.dryRun) {
+    if (stateChanged) {
+      io.info(`[ci-channel setup] [dry-run] Would write ${statePath}`)
+    } else {
+      io.info(
+        `[ci-channel setup] [dry-run] state.json unchanged — would skip write`,
+      )
+    }
+  } else if (stateChanged) {
+    if (!(await io.confirm(`Write credentials to ${statePath}?`))) {
+      throw new UserDeclinedError('Stopped before writing state.json.')
+    }
+    deps.writeState(projectRoot, state)
+    io.info(`[ci-channel setup] Wrote ${statePath} (mode 0o600)`)
+  } else {
+    io.info(
+      `[ci-channel setup] state.json already has current values — skipping write`,
     )
   }
 

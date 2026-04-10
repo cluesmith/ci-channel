@@ -204,6 +204,8 @@ When `--repo` is present, the other flags behave independently: `--yes` skips co
 
 Each step is preceded by an interactive confirmation (unless `--yes`). In `--dry-run` mode, each step prints what it would do and continues without executing.
 
+**Critical ordering invariant**: the webhook reconciliation (steps 6–7) happens **before** the state.json write (step 5 in the numbered list but step 8 in execution order — see below). This is because a fresh webhookSecret must never be persisted to state.json until the corresponding webhook has been created or PATCH-updated. Otherwise, a decline or failure at the webhook step would leave state.json carrying a secret that does not match anything on GitHub, and the next run would (incorrectly) treat the persisted secret as "reused from valid state" and skip the PATCH path entirely — silently breaking HMAC validation. See the `runInstall` comment block in `lib/setup/orchestrator.ts` for the full rationale.
+
 1. **Detect project root** (`findProjectRoot(process.cwd())`). If no root is detected, fail fast with: "Could not locate project root (no `.mcp.json` or `.git/` found walking up from $CWD). Run this from inside the project you want to install into."
 2. **Check existing state**: Load `<project-root>/.claude/channels/ci/state.json`. If present and contains `webhookSecret` + `smeeUrl`, remember "state exists — will reuse".
 3. **Provision smee channel** (skip if state already has a valid smeeUrl, or if `--smee-url` was passed). Reuses `fetchSmeeChannel()` from `lib/bootstrap.ts`.

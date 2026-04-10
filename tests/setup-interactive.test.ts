@@ -129,7 +129,10 @@ describe('interactive orchestrator — all-yes path', () => {
       fetchSmeeCalls: 0,
     }
     const deps = buildDeps(counts, { existingState: {}, ghHooks: [], mcpRead: { exists: false } })
-    // 4 prompts expected: smee provision, write state, create webhook, update .mcp.json
+    // Prompt order (new in iter3): smee provision, create webhook, write
+    // state, update .mcp.json. State is deliberately written AFTER the
+    // webhook is reconciled so a webhook-step decline/failure doesn't
+    // leave state.json with a persisted-but-unused secret.
     const io = scriptedIo({ confirms: [true, true, true, true] })
     await runInstall(interactiveArgs(), deps, io)
 
@@ -138,11 +141,11 @@ describe('interactive orchestrator — all-yes path', () => {
     assert.equal(counts.ghCreateHookCalls, 1)
     assert.equal(counts.writeMcpJsonCalls, 1)
 
-    // Each confirm prompt should have been asked.
+    // Prompt ordering lock: smee → webhook → state → mcp.
     assert.equal(io.confirmHistory.length, 4)
     assert.match(io.confirmHistory[0], /smee/)
-    assert.match(io.confirmHistory[1], /credentials|state/)
-    assert.match(io.confirmHistory[2], /webhook/)
+    assert.match(io.confirmHistory[1], /webhook/)
+    assert.match(io.confirmHistory[2], /credentials|state/)
     assert.match(io.confirmHistory[3], /\.mcp\.json/)
   })
 })
@@ -172,34 +175,7 @@ describe('interactive orchestrator — decline paths', () => {
     assert.equal(counts.writeMcpJsonCalls, 0)
   })
 
-  test('decline at state write: state provisioned in memory but no files written', async () => {
-    const counts: MockCounts = {
-      writeStateCalls: 0,
-      ghCreateHookCalls: 0,
-      ghUpdateHookCalls: 0,
-      writeMcpJsonCalls: 0,
-      fetchSmeeCalls: 0,
-    }
-    const deps = buildDeps(counts, { existingState: {} })
-    // Accept smee provision; decline state write.
-    const io = scriptedIo({ confirms: [true, false] })
-
-    await assert.rejects(
-      () => runInstall(interactiveArgs(), deps, io),
-      (err: UserDeclinedError) =>
-        err instanceof UserDeclinedError &&
-        err.userMessage.includes('state.json') &&
-        err.exitCode === 0,
-    )
-    // fetchSmeeChannel runs before the write-state prompt.
-    assert.equal(counts.fetchSmeeCalls, 1)
-    // But no file writes happened.
-    assert.equal(counts.writeStateCalls, 0)
-    assert.equal(counts.ghCreateHookCalls, 0)
-    assert.equal(counts.writeMcpJsonCalls, 0)
-  })
-
-  test('decline at webhook creation: state written but no webhook, no .mcp.json', async () => {
+  test('decline at webhook creation: no webhook, no state.json write, no .mcp.json', async () => {
     const counts: MockCounts = {
       writeStateCalls: 0,
       ghCreateHookCalls: 0,
@@ -208,8 +184,12 @@ describe('interactive orchestrator — decline paths', () => {
       fetchSmeeCalls: 0,
     }
     const deps = buildDeps(counts, { existingState: {}, ghHooks: [] })
-    // Accept smee + state; decline webhook.
-    const io = scriptedIo({ confirms: [true, true, false] })
+    // Accept smee provision; decline webhook creation. After iter3's
+    // reordering, webhook comes before state write, so declining the
+    // webhook ALSO prevents state.json from being written — which is
+    // the point: a persisted fresh secret without a matching webhook
+    // would cause the silent-HMAC failure mode on the next run.
+    const io = scriptedIo({ confirms: [true, false] })
 
     await assert.rejects(
       () => runInstall(interactiveArgs(), deps, io),
@@ -219,8 +199,36 @@ describe('interactive orchestrator — decline paths', () => {
         err.exitCode === 0,
     )
     assert.equal(counts.fetchSmeeCalls, 1)
-    assert.equal(counts.writeStateCalls, 1)
+    assert.equal(counts.writeStateCalls, 0, 'state must NOT be written when webhook is declined')
     assert.equal(counts.ghCreateHookCalls, 0)
+    assert.equal(counts.writeMcpJsonCalls, 0)
+  })
+
+  test('decline at state write (after webhook created): webhook exists but state empty — next run will recover via PATCH', async () => {
+    const counts: MockCounts = {
+      writeStateCalls: 0,
+      ghCreateHookCalls: 0,
+      ghUpdateHookCalls: 0,
+      writeMcpJsonCalls: 0,
+      fetchSmeeCalls: 0,
+    }
+    const deps = buildDeps(counts, { existingState: {}, ghHooks: [] })
+    // Accept smee + webhook; decline state write.
+    const io = scriptedIo({ confirms: [true, true, false] })
+
+    await assert.rejects(
+      () => runInstall(interactiveArgs(), deps, io),
+      (err: UserDeclinedError) =>
+        err instanceof UserDeclinedError &&
+        err.userMessage.includes('state.json') &&
+        err.exitCode === 0,
+    )
+    // Webhook was created with a fresh secret...
+    assert.equal(counts.ghCreateHookCalls, 1)
+    // ...but state.json was never written, so the next run will see
+    // secretWasGenerated=true again and PATCH the webhook to the newly
+    // generated secret. The user is not silently broken.
+    assert.equal(counts.writeStateCalls, 0)
     assert.equal(counts.writeMcpJsonCalls, 0)
   })
 
@@ -237,7 +245,8 @@ describe('interactive orchestrator — decline paths', () => {
       ghHooks: [],
       mcpRead: { exists: false },
     })
-    // Accept smee + state + webhook; decline .mcp.json.
+    // New order (iter3): smee → webhook → state → mcp. Accept the
+    // first three, decline .mcp.json.
     const io = scriptedIo({ confirms: [true, true, true, false] })
 
     await assert.rejects(
@@ -248,8 +257,8 @@ describe('interactive orchestrator — decline paths', () => {
         err.exitCode === 0,
     )
     assert.equal(counts.fetchSmeeCalls, 1)
-    assert.equal(counts.writeStateCalls, 1)
     assert.equal(counts.ghCreateHookCalls, 1)
+    assert.equal(counts.writeStateCalls, 1) // state IS written — webhook succeeded first
     assert.equal(counts.writeMcpJsonCalls, 0)
   })
 })

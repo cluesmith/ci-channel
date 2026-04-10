@@ -153,20 +153,26 @@ runSetup(argv)
         ├── legacyGlobalStateExists() → informational note (if true)
         ├── readState() → existingState
         ├── resolveSecret:   generate 256-bit or reuse existing
+        │                    (tracks secretWasGenerated flag)
         ├── resolveSmeeUrl:  --smee-url override | reuse | fetchSmeeChannel
-        ├── writeState(projectRoot, state)  [skipped if unchanged; mode 0o600]
         ├── isGitignored check → io.warn if not ignored
         ├── ghListHooks(repo) → scan for matching smee URL
-        ├── if matching hook && secret was freshly generated this run
+        ├── ── webhook reconciliation FIRST (before state write) ──
+        │   if matching hook && secret was freshly generated this run
         │     → ghUpdateHook(repo, id, payload)  [PATCHes existing hook with new secret]
         │   else if matching hook && secret reused from state
         │     → skip (idempotent happy path)
         │   else
         │     → ghCreateHook(repo, payload)  [POSTs via piped stdin]
+        │   (any failure or user decline throws HERE — state.json untouched)
+        ├── writeState(projectRoot, state)  [skipped if unchanged; mode 0o600]
+        │   (only reached if the webhook step succeeded)
         ├── readMcpJson + mergeCiServer → {updated, action}
         ├── writeMcpJson  [skipped if action === 'skipped_exists']
         └── printNextSteps(action)  [conditional approval reminder]
 ```
+
+**Critical ordering invariant**: the webhook reconciliation runs **before** the state.json write. This is not an aesthetic choice — it closes a silent-HMAC failure mode. If state were written first, a subsequent failure or user decline of the webhook PATCH would leave state.json with a fresh secret that doesn't match anything on GitHub, and the next run would (incorrectly) treat the persisted secret as "reused from valid state" (`secretWasGenerated === false`) and skip the PATCH path entirely, silently breaking HMAC validation forever. By reconciling the webhook first, a failure/decline throws before state is touched, and the next run correctly re-enters the fresh-secret-PATCH branch.
 
 ### Configuration (`lib/config.ts`)
 
