@@ -2,7 +2,7 @@
   "mcpServers": {
     "ci": {
       "command": "npx",
-      "args": ["tsx", "server.ts"],
+      "args": ["tsx", "server.ts", "--repos", "cluesmith/ci-channel"],
       "cwd": "${CLAUDE_PLUGIN_ROOT}"
     }
   }
