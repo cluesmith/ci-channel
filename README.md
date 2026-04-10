@@ -341,6 +341,18 @@ Forges occasionally retry webhook delivery. The plugin tracks the last 100 deliv
 
 ## Troubleshooting
 
+### Server name vs package name
+
+The npm package is `ci-channel`, but inside Claude Code it's keyed as `ci` in your `.mcp.json`. The channel flag uses the key: `--dangerously-load-development-channels server:ci`. Don't use `server:ci-channel` — it won't match.
+
+### `/mcp` shows `ci` as failed but logs say "Successfully connected"
+
+You forgot the channel flag. The MCP server connected, but without `--dangerously-load-development-channels server:ci`, Claude Code doesn't treat it as a channel.
+
+### Project-scoped server appears inactive after registration
+
+Project-scoped MCP servers are dormant until you either (a) approve them via `/mcp` inside a Claude Code session, or (b) add the key to `enabledMcpjsonServers` in `~/.claude.json`. If unsure, use `--scope user` instead.
+
 ### No notifications arriving
 
 1. Check that the plugin sent a setup notification on startup (with URL and secret)

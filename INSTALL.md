@@ -19,6 +19,10 @@ claude mcp add-json --scope project ci '{"command":"npx","args":["-y","ci-channe
 
 `npx -y ci-channel` downloads and runs the [ci-channel npm package](https://www.npmjs.com/package/ci-channel) on first invocation — no local clone needed. Project scope means each project gets its own isolated smee channel and webhook.
 
+> **Important — server name vs package name:** The `ci` in the command above is the **server key** used inside Claude Code. The package name is `ci-channel`, but the channel flag in step 2 uses the key: `server:ci`. These are intentionally different. Don't try `server:ci-channel` — it won't match.
+
+> **Project-scoped servers need explicit approval.** After `claude mcp add-json --scope project`, the server is dormant until you either (a) approve it via `/mcp` inside a Claude Code session, or (b) add the key to `enabledMcpjsonServers` in `~/.claude.json`. Install can appear to succeed while the server silently stays unloaded. If unsure, use `--scope user` instead.
+
 ## Step 2: Launch Claude Code once to trigger auto-provisioning
 
 ```bash
@@ -110,3 +114,13 @@ After setup, you can verify the channel is working:
 1. The `ci` MCP server should appear in `claude mcp list`
 2. Trigger a CI failure (e.g., push a commit with a broken test)
 3. A `<channel source="ci" ...>` notification should appear in the Claude Code session
+
+## Troubleshooting
+
+**`/mcp` shows `ci` as "failed" but debug logs show "Successfully connected"** — You forgot the channel flag. The MCP server connected fine, but without `--dangerously-load-development-channels server:ci`, Claude Code doesn't treat it as a channel. Relaunch with the flag.
+
+**"Failed to reconnect to ci-channel"** — You're using the package name instead of the server key. The channel flag takes the key from your `.mcp.json` (which is `ci`), not the npm package name (`ci-channel`). Use `server:ci`.
+
+**Install appears to succeed but no notifications arrive** — If you used `--scope project`, the server is dormant until approved. Run `claude mcp list` to confirm it shows `Connected`; if it's missing, approve it via `/mcp` inside a session, or re-register with `--scope user`.
+
+**No `state.json` after first launch** — The plugin writes credentials only when bootstrap completes. Check stderr for `[ci-channel] Saved auto-provisioned state to state.json`. If you see `smee.io timed out` instead, your network may be blocking smee.io.
