@@ -196,6 +196,35 @@ GITEA_TOKEN=your-gitea-api-token
 
 **Reference**: [Gitea Webhooks docs](https://docs.gitea.com/usage/webhooks)
 
+### Codev Projects
+
+If you use [Codev](https://github.com/cluesmith/codev) for AI-assisted development, you can add ci-channel to your architect session so CI notifications arrive while you work.
+
+**Step 1: Register the MCP server** (one-time):
+```bash
+claude mcp add-json --scope user ci '{"command":"npx","args":["tsx","server.ts"],"cwd":"/absolute/path/to/ci-channel"}'
+```
+
+**Step 2: Update `.codev/config.json`** to add the channel flag to the architect command:
+```json
+{
+  "shell": {
+    "architect": "claude --dangerously-skip-permissions --dangerously-load-development-channels server:ci",
+    "builder": "claude --dangerously-skip-permissions",
+    "shell": "bash"
+  }
+}
+```
+
+The architect session will now receive CI notifications in real-time. Builders don't need the channel — they focus on implementation.
+
+**Step 3: Configure the webhook** for your repo (see [Quick Start](#zero-config-quick-start) step 4).
+
+**Filtering**: To limit notifications to specific repos, add `--repos` to the MCP server args:
+```bash
+claude mcp add-json --scope user ci '{"command":"npx","args":["tsx","server.ts","--repos","your-org/your-repo"],"cwd":"/absolute/path/to/ci-channel"}'
+```
+
 ## Configuration Reference
 
 Configuration uses CLI args (passed in the `args` array when registering the MCP server) for structural settings, and `~/.claude/channels/ci/.env` for secrets. Auto-provisioned state (generated secret, smee URL) is persisted to `~/.claude/channels/ci/state.json`.
