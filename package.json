@@ -1,32 +1,53 @@
 {
   "name": "ci-channel",
   "version": "0.1.0",
-  "description": "Claude Code channel plugin for real-time GitHub Actions CI/CD failure notifications",
+  "description": "Claude Code channel plugin for real-time CI/CD failure notifications (GitHub Actions, GitLab CI, Gitea Actions)",
   "type": "module",
+  "main": "dist/server.js",
+  "bin": {
+    "ci-channel": "dist/server.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "INSTALL.md",
+    "LICENSE"
+  ],
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/cluesmith/ci-channel.git"
   },
+  "homepage": "https://github.com/cluesmith/ci-channel#readme",
+  "bugs": {
+    "url": "https://github.com/cluesmith/ci-channel/issues"
+  },
   "keywords": [
     "claude-code",
     "mcp",
     "github-actions",
+    "gitlab-ci",
+    "gitea",
     "ci",
     "notifications",
     "channel-plugin"
   ],
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "start": "node --import tsx/esm server.ts",
-    "build": "echo 'No build step — tsx runs TypeScript directly'",
+    "build": "tsc && chmod +x dist/server.js",
+    "prepack": "npm run build",
     "test": "node --import tsx/esm --test --test-force-exit tests/*.test.ts tests/forges/*.test.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
-    "smee-client": "^2.0.4",
-    "tsx": "^4.21.0"
+    "smee-client": "^2.0.4"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0"
+    "@types/node": "^22.0.0",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.2"
   }
 }
