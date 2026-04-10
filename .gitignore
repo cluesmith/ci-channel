@@ -5,6 +5,8 @@ bun.lock
 # Environment / secrets
 .env
 *.env.local
+.claude/channels/ci/.env
+.claude/channels/ci/state.json
 
 # Codev
 .agent-farm/

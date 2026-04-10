@@ -59,7 +59,7 @@ claude --dangerously-load-development-channels server:ci
 
 On first run, the plugin:
 1. Generates a `WEBHOOK_SECRET` and provisions a smee.io relay channel
-2. Saves auto-provisioned state to `~/.claude/channels/ci/state.json` (persists across restarts)
+2. Saves auto-provisioned state to `<project-root>/.claude/channels/ci/state.json` (per-project, persists across restarts)
 3. Sends a channel notification to Claude with the webhook URL and secret:
 
 ```
@@ -128,7 +128,7 @@ Or manually: **Settings > Webhooks > Add webhook**
 | **Secret** | The secret from the notification |
 | **Events** | Select **"Workflow runs"** only |
 
-**`.env` file** (`~/.claude/channels/ci/.env`): auto-generated on first run. If configuring manually:
+**`.env` file** (`<project-root>/.claude/channels/ci/.env`): auto-generated on first run. If configuring manually:
 ```env
 WEBHOOK_SECRET=your-webhook-secret
 ```
@@ -155,7 +155,7 @@ For nested namespaces, use the exact `path_with_namespace` value: `--repos "grou
 | **Secret token** | The secret from the notification |
 | **Trigger** | Check **Pipeline events** only |
 
-**`.env` file** (`~/.claude/channels/ci/.env`): auto-generated on first run. If configuring manually:
+**`.env` file** (`<project-root>/.claude/channels/ci/.env`): auto-generated on first run. If configuring manually:
 ```env
 WEBHOOK_SECRET=your-gitlab-secret-token
 ```
@@ -172,7 +172,7 @@ claude mcp add-json --scope project ci '{"command":"npx","args":["-y","ci-channe
 claude --dangerously-load-development-channels server:ci
 ```
 
-**Secrets** — Add to `~/.claude/channels/ci/.env`:
+**Secrets** — Add to `<project-root>/.claude/channels/ci/.env`:
 ```env
 GITEA_TOKEN=your-gitea-api-token
 ```
@@ -185,7 +185,7 @@ GITEA_TOKEN=your-gitea-api-token
 | **Secret** | The secret from the notification |
 | **Events** | Select **"Workflow runs"** |
 
-**`.env` file** (`~/.claude/channels/ci/.env`):
+**`.env` file** (`<project-root>/.claude/channels/ci/.env`):
 ```env
 WEBHOOK_SECRET=your-webhook-secret
 GITEA_TOKEN=your-gitea-api-token
@@ -227,7 +227,9 @@ claude mcp add-json --scope project ci '{"command":"npx","args":["-y","ci-channe
 
 ## Configuration Reference
 
-Configuration uses CLI args (passed in the `args` array when registering the MCP server) for structural settings, and `~/.claude/channels/ci/.env` for secrets. Auto-provisioned state (generated secret, smee URL) is persisted to `~/.claude/channels/ci/state.json`.
+Configuration uses CLI args (passed in the `args` array when registering the MCP server) for structural settings, and `<project-root>/.claude/channels/ci/.env` for secrets. Auto-provisioned state (generated secret, smee URL) is persisted to `<project-root>/.claude/channels/ci/state.json`. Each project is fully isolated.
+
+**Project root detection**: ci-channel walks up from `process.cwd()` looking for `.mcp.json` or `.git/` to find the project root. Falls back to the legacy global path `~/.claude/channels/ci/` if neither is found (for backward compatibility).
 
 Precedence: CLI args > env vars > `.env` file > `state.json`.
 

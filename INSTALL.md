@@ -29,17 +29,17 @@ claude mcp add-json --scope project ci '{"command":"npx","args":["-y","ci-channe
 claude --dangerously-load-development-channels server:ci
 ```
 
-On first launch, the plugin generates a webhook secret and provisions a smee.io relay URL, saving them to `~/.claude/channels/ci/state.json`. Exit Claude Code after startup completes.
+On first launch, the plugin generates a webhook secret and provisions a smee.io relay URL, saving them to `.claude/channels/ci/state.json`. Exit Claude Code after startup completes.
 
 ## Step 3: Read the auto-provisioned credentials
 
 ```bash
-cat ~/.claude/channels/ci/state.json
+cat .claude/channels/ci/state.json
 ```
 
 This returns JSON with `webhookSecret` and `smeeUrl` fields.
 
-If `~/.claude/channels/ci/.env` exists with `WEBHOOK_SECRET` and `SMEE_URL` already set, use those values instead.
+If `.claude/channels/ci/.env` exists with `WEBHOOK_SECRET` and `SMEE_URL` already set, use those values instead.
 
 ## Step 4: Create the GitHub webhook
 
@@ -96,10 +96,10 @@ Replace step 1 with:
 claude mcp add-json --scope project ci '{"command":"npx","args":["-y","ci-channel","--forge","gitea","--gitea-url","https://YOUR_GITEA_INSTANCE","--repos","OWNER/REPO"]}'
 ```
 
-Add a Gitea API token to `~/.claude/channels/ci/.env`:
+Add a Gitea API token to `.claude/channels/ci/.env`:
 
 ```bash
-echo 'GITEA_TOKEN=your-gitea-api-token' >> ~/.claude/channels/ci/.env
+echo 'GITEA_TOKEN=your-gitea-api-token' >> .claude/channels/ci/.env
 ```
 
 For the webhook (step 4), configure in Gitea UI:

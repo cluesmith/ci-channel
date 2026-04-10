@@ -1,7 +1,8 @@
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { loadState } from './state.js'
+import { findProjectRoot } from './project-root.js'
 
 export const VALID_FORGES = ['github', 'gitlab', 'gitea'] as const
 export type ForgeName = (typeof VALID_FORGES)[number]
@@ -49,7 +50,30 @@ function splitCommaList(value: string | undefined): string[] | null {
   return items.length > 0 ? items : null
 }
 
-export const DEFAULT_ENV_PATH = join(homedir(), '.claude', 'channels', 'ci', '.env')
+const GLOBAL_ENV_PATH = join(homedir(), '.claude', 'channels', 'ci', '.env')
+
+/**
+ * Resolves the default .env path:
+ *  1. If a project root is detected (nearest .mcp.json or .git/), use
+ *     <project-root>/.claude/channels/ci/.env
+ *  2. Else if the legacy global .env exists, use it (backward compat)
+ *  3. Else default to the project-scoped path under cwd
+ */
+export function getDefaultEnvPath(): string {
+  const projectRoot = findProjectRoot()
+  if (projectRoot) {
+    const projectEnv = join(projectRoot, '.claude', 'channels', 'ci', '.env')
+    // Prefer project-local; fall back to global only if project-local doesn't exist
+    if (existsSync(projectEnv)) return projectEnv
+    if (existsSync(GLOBAL_ENV_PATH)) return GLOBAL_ENV_PATH
+    return projectEnv
+  }
+  if (existsSync(GLOBAL_ENV_PATH)) return GLOBAL_ENV_PATH
+  return join(process.cwd(), '.claude', 'channels', 'ci', '.env')
+}
+
+// Kept for backward compatibility with tests and callers that expect a constant.
+export const DEFAULT_ENV_PATH = GLOBAL_ENV_PATH
 
 /**
  * Parse CLI args from argv (process.argv.slice(2)).
@@ -83,7 +107,7 @@ function parseCliArgs(argv: string[]): Record<string, string> {
 }
 
 export function loadConfig(envFilePath?: string, argv?: string[], statePath?: string): Config {
-  const envPath = envFilePath ?? DEFAULT_ENV_PATH
+  const envPath = envFilePath ?? getDefaultEnvPath()
   const fileEnv = parseEnvFile(envPath)
   const cliArgs = parseCliArgs(argv ?? process.argv.slice(2))
 
