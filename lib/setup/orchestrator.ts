@@ -24,6 +24,7 @@ export interface InstallDeps {
   fetchSmeeChannel(): Promise<string | null>
   ghListHooks(repo: string): Promise<GhHook[]>
   ghCreateHook(repo: string, payload: object): Promise<void>
+  ghUpdateHook(repo: string, hookId: number, payload: object): Promise<void>
   readMcpJson(path: string): McpJsonReadResult
   writeMcpJson(path: string, mcp: McpJson, indent: number): void
 }
@@ -94,6 +95,14 @@ export async function runInstall(
   const state: PluginState = { ...existingState }
 
   // --- Resolve webhook secret (reuse or generate) ---
+  //
+  // `secretWasGenerated` is load-bearing downstream: if we generate a fresh
+  // secret in this run AND we later find an existing webhook at our smee
+  // URL, we must PATCH that hook to use the new secret rather than
+  // skipping — otherwise the old webhook keeps signing with a secret
+  // nobody has anymore, and every event fails HMAC validation silently.
+  // See the webhook-match branch below for the full guard.
+  const secretWasGenerated = !existingState.webhookSecret
   if (!state.webhookSecret) {
     if (args.dryRun) {
       io.info(
@@ -154,29 +163,67 @@ export async function runInstall(
     (h) => h.config?.url === expectedSmeeUrl,
   )
 
-  // --- Create webhook (skipped if match exists; skipped in dry-run for POST) ---
-  if (matchingHook) {
+  // --- Create or update webhook ---
+  //
+  // There are three cases:
+  //   (1) No matching hook → create one.
+  //   (2) Matching hook + reused secret → skip (idempotent re-run).
+  //   (3) Matching hook + **freshly generated** secret → PATCH the hook
+  //       to use the new secret. Without this, the hook keeps signing
+  //       with the old secret (which nobody has — we just regenerated
+  //       it), and every event fails HMAC validation silently. This
+  //       happens when state.json was deleted or partially corrupted
+  //       but the webhook was left in place.
+  const webhookPayload = {
+    config: {
+      url: expectedSmeeUrl,
+      content_type: 'json',
+      secret: state.webhookSecret,
+    },
+    events: ['workflow_run'],
+    active: true,
+  }
+
+  if (matchingHook && !secretWasGenerated) {
+    // Case (2): idempotent happy path.
     io.info(
       `[ci-channel setup] Webhook already exists for ${expectedSmeeUrl} — skipping create`,
     )
+  } else if (matchingHook && secretWasGenerated) {
+    // Case (3): stale secret on existing hook. PATCH it.
+    if (matchingHook.id === undefined) {
+      throw new SetupError(
+        `gh returned a matching hook without an id; cannot update. Delete the existing webhook at ${expectedSmeeUrl} manually and re-run setup.`,
+      )
+    }
+    if (args.dryRun) {
+      io.info(
+        `[ci-channel setup] [dry-run] Would update existing webhook (id ${matchingHook.id}) with freshly generated secret (state.json was missing a secret)`,
+      )
+    } else {
+      if (
+        !(await io.confirm(
+          `Update existing webhook (id ${matchingHook.id}) with the newly generated secret?`,
+        ))
+      ) {
+        throw new UserDeclinedError('Stopped before updating webhook secret.')
+      }
+      await deps.ghUpdateHook(args.repo, matchingHook.id, webhookPayload)
+      io.info(
+        `[ci-channel setup] Updated existing webhook (id ${matchingHook.id}) — rotated to freshly generated secret`,
+      )
+    }
   } else if (args.dryRun) {
+    // Case (1) in dry-run.
     io.info(
       `[ci-channel setup] [dry-run] Would create GitHub webhook on ${args.repo} targeting ${expectedSmeeUrl}`,
     )
   } else {
+    // Case (1): create new webhook.
     if (!(await io.confirm(`Create GitHub webhook on ${args.repo}?`))) {
       throw new UserDeclinedError('Stopped before webhook creation.')
     }
-    const payload = {
-      config: {
-        url: expectedSmeeUrl,
-        content_type: 'json',
-        secret: state.webhookSecret,
-      },
-      events: ['workflow_run'],
-      active: true,
-    }
-    await deps.ghCreateHook(args.repo, payload)
+    await deps.ghCreateHook(args.repo, webhookPayload)
     io.info(
       `[ci-channel setup] Created GitHub webhook on ${args.repo} → ${expectedSmeeUrl}`,
     )

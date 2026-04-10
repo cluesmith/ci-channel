@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto'
 import { fetchSmeeChannel } from '../bootstrap.js'
 import { parseSetupArgs, setupUsage } from './args.js'
 import { SetupError, UserDeclinedError } from './errors.js'
-import { ghCreateHook, ghListHooks } from './gh.js'
+import { ghCreateHook, ghListHooks, ghUpdateHook } from './gh.js'
 import { isGitignored } from './gitignore.js'
 import { createAutoYesIo, createInteractiveIo } from './io.js'
 import { readMcpJson, writeMcpJson } from './mcp-json.js'
@@ -102,6 +102,7 @@ function buildInstallDeps(): InstallDeps {
     fetchSmeeChannel,
     ghListHooks,
     ghCreateHook,
+    ghUpdateHook,
     readMcpJson,
     writeMcpJson,
   }

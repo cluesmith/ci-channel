@@ -30,6 +30,8 @@ interface RecordedCalls {
   ghListHooksCalls: number
   ghCreateHookCalls: number
   ghCreateHookLastArg: { repo: string; payload: object } | null
+  ghUpdateHookCalls: number
+  ghUpdateHookLastArg: { repo: string; hookId: number; payload: object } | null
   readMcpJsonCalls: number
   writeMcpJsonCalls: number
   writeMcpJsonLastArg: { path: string; mcp: McpJson; indent: number } | null
@@ -67,6 +69,8 @@ function buildMockDepsAndIo(cfg: MockConfig = {}): {
     ghListHooksCalls: 0,
     ghCreateHookCalls: 0,
     ghCreateHookLastArg: null,
+    ghUpdateHookCalls: 0,
+    ghUpdateHookLastArg: null,
     readMcpJsonCalls: 0,
     writeMcpJsonCalls: 0,
     writeMcpJsonLastArg: null,
@@ -107,6 +111,10 @@ function buildMockDepsAndIo(cfg: MockConfig = {}): {
     ghCreateHook: async (repo, payload) => {
       calls.ghCreateHookCalls++
       calls.ghCreateHookLastArg = { repo, payload }
+    },
+    ghUpdateHook: async (repo, hookId, payload) => {
+      calls.ghUpdateHookCalls++
+      calls.ghUpdateHookLastArg = { repo, hookId, payload }
     },
     readMcpJson: () => {
       calls.readMcpJsonCalls++
@@ -180,7 +188,7 @@ describe('runInstall — happy paths', () => {
     assert.equal(calls.writeMcpJsonCalls, 0) // skipped — entry already present
   })
 
-  test('re-run with partial state (only smeeUrl): writes to fill in secret', async () => {
+  test('re-run with partial state (only smeeUrl, no existing hook): writes state and creates webhook', async () => {
     const { deps, io, calls } = buildMockDepsAndIo({
       existingState: {
         smeeUrl: 'https://smee.io/existing',
@@ -195,6 +203,7 @@ describe('runInstall — happy paths', () => {
     assert.equal(calls.fetchSmeeCalls, 0) // smeeUrl already set
     assert.equal(calls.writeStateCalls, 1) // state changed (new secret added)
     assert.equal(calls.ghCreateHookCalls, 1)
+    assert.equal(calls.ghUpdateHookCalls, 0)
   })
 
   test('non-matching webhook: user has unrelated relay, create still runs', async () => {
@@ -227,6 +236,126 @@ describe('runInstall — happy paths', () => {
     const written = calls.writeMcpJsonLastArg?.mcp as { mcpServers: Record<string, unknown> }
     assert.ok('ci' in written.mcpServers)
     assert.ok('other' in written.mcpServers)
+  })
+})
+
+describe('runInstall — webhook secret freshness vs existing hook (silent-HMAC-failure regression)', () => {
+  // These tests guard against the bug where a freshly generated secret
+  // paired with an existing webhook at the same URL would be silently
+  // skipped, leaving the webhook signing with a secret the runtime no
+  // longer has and causing every event to fail HMAC validation.
+
+  test('state deleted (no secret, no smeeUrl) + --smee-url points at existing hook → PATCHes the hook', async () => {
+    const { deps, io, calls } = buildMockDepsAndIo({
+      existingState: {}, // state.json deleted — no secret, no smeeUrl
+      ghHooks: [
+        { id: 42, config: { url: 'https://smee.io/existing' } },
+      ],
+    })
+
+    const args = baseArgs()
+    args.smeeUrl = 'https://smee.io/existing'
+
+    await runInstall(args, deps, io)
+
+    // Secret was freshly generated in this run.
+    assert.equal(calls.generateSecretCalls, 1)
+    // State was written (new secret + smee URL from CLI override).
+    assert.equal(calls.writeStateCalls, 1)
+    // Critical: existing hook is NOT silently skipped.
+    assert.equal(calls.ghCreateHookCalls, 0)
+    // Instead, it's PATCHed with the new secret.
+    assert.equal(calls.ghUpdateHookCalls, 1)
+    assert.equal(calls.ghUpdateHookLastArg?.repo, 'owner/repo')
+    assert.equal(calls.ghUpdateHookLastArg?.hookId, 42)
+    // And the payload has the freshly generated secret.
+    const payload = calls.ghUpdateHookLastArg?.payload as {
+      config: { secret: string; url: string }
+    }
+    assert.equal(payload.config.url, 'https://smee.io/existing')
+    assert.match(payload.config.secret, /^deadbeef/)
+  })
+
+  test('partial state (smeeUrl present, no secret) + matching hook → PATCHes the hook', async () => {
+    const { deps, io, calls } = buildMockDepsAndIo({
+      existingState: {
+        smeeUrl: 'https://smee.io/partial',
+        // webhookSecret missing — installer must regenerate
+      },
+      ghHooks: [
+        { id: 7, config: { url: 'https://smee.io/partial' } },
+      ],
+    })
+
+    await runInstall(baseArgs(), deps, io)
+
+    assert.equal(calls.generateSecretCalls, 1)
+    // Critical: must update, not skip.
+    assert.equal(calls.ghCreateHookCalls, 0)
+    assert.equal(calls.ghUpdateHookCalls, 1)
+    assert.equal(calls.ghUpdateHookLastArg?.hookId, 7)
+  })
+
+  test('idempotent happy path: state intact + matching hook → skip (no update)', async () => {
+    // Sanity check that the normal idempotent re-run still skips.
+    const { deps, io, calls } = buildMockDepsAndIo({
+      existingState: {
+        webhookSecret: 'existing-secret',
+        smeeUrl: 'https://smee.io/intact',
+      },
+      ghHooks: [
+        { id: 99, config: { url: 'https://smee.io/intact' } },
+      ],
+    })
+
+    await runInstall(baseArgs(), deps, io)
+
+    assert.equal(calls.generateSecretCalls, 0)
+    assert.equal(calls.ghCreateHookCalls, 0)
+    assert.equal(calls.ghUpdateHookCalls, 0) // skip, not update
+  })
+
+  test('fresh secret + matching hook without id → fail fast', async () => {
+    // Defensive: if gh ever returns a hook without an id, we can't
+    // PATCH it — fail fast with clear guidance instead of trying.
+    const { deps, io } = buildMockDepsAndIo({
+      existingState: {
+        smeeUrl: 'https://smee.io/noid',
+      },
+      ghHooks: [
+        { config: { url: 'https://smee.io/noid' } } as GhHook, // no id
+      ],
+    })
+
+    await assert.rejects(
+      () => runInstall(baseArgs(), deps, io),
+      (err: SetupError) =>
+        err instanceof SetupError &&
+        err.userMessage.includes('matching hook without an id'),
+    )
+  })
+
+  test('dry-run: fresh secret + matching hook → logs "would update", no call', async () => {
+    const args = baseArgs()
+    args.dryRun = true
+    const { deps, io, calls } = buildMockDepsAndIo({
+      existingState: {
+        smeeUrl: 'https://smee.io/dryrun',
+      },
+      ghHooks: [
+        { id: 11, config: { url: 'https://smee.io/dryrun' } },
+      ],
+    })
+
+    await runInstall(args, deps, io)
+
+    // Dry-run: no secret actually generated, no mutations.
+    assert.equal(calls.generateSecretCalls, 0)
+    assert.equal(calls.ghCreateHookCalls, 0)
+    assert.equal(calls.ghUpdateHookCalls, 0)
+    // But the output should mention the planned update.
+    const joined = calls.info.join('\n')
+    assert.match(joined, /\[dry-run\] Would update existing webhook/)
   })
 })
 

@@ -2,7 +2,12 @@ import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import type { ChildProcess, SpawnOptions } from 'node:child_process'
-import { ghCreateHook, ghListHooks, type SpawnFn } from '../lib/setup/gh.js'
+import {
+  ghCreateHook,
+  ghListHooks,
+  ghUpdateHook,
+  type SpawnFn,
+} from '../lib/setup/gh.js'
 import { SetupError } from '../lib/setup/errors.js'
 
 /**
@@ -300,6 +305,81 @@ describe('ghCreateHook', () => {
       (err: SetupError) =>
         err instanceof SetupError &&
         err.userMessage.includes('gh CLI not found'),
+    )
+  })
+})
+
+describe('ghUpdateHook', () => {
+  test('PATCHes payload via piped stdin on success', async () => {
+    const recorder = freshRecorder()
+    const payload = {
+      config: {
+        url: 'https://smee.io/existing',
+        content_type: 'json',
+        secret: 'rotated',
+      },
+      events: ['workflow_run'],
+      active: true,
+    }
+    await ghUpdateHook('owner/repo', 42, payload, {
+      spawn: fakeSpawn({ exitCode: 0 }, recorder),
+    })
+
+    assert.equal(recorder.command, 'gh')
+    assert.deepEqual(
+      [...recorder.args],
+      ['api', 'repos/owner/repo/hooks/42', '--method', 'PATCH', '--input', '-'],
+    )
+    assert.deepEqual(JSON.parse(recorder.stdinBytes), payload)
+  })
+
+  test('uses stdio: ["pipe", "pipe", "pipe"]', async () => {
+    const recorder = freshRecorder()
+    await ghUpdateHook(
+      'owner/repo',
+      1,
+      { config: {} },
+      { spawn: fakeSpawn({ exitCode: 0 }, recorder) },
+    )
+    const stdio = recorder.options.stdio
+    assert.ok(Array.isArray(stdio))
+    assert.deepEqual([...(stdio as unknown[])], ['pipe', 'pipe', 'pipe'])
+  })
+
+  test('non-zero exit → SetupError with stderr', async () => {
+    const recorder = freshRecorder()
+    await assert.rejects(
+      () =>
+        ghUpdateHook(
+          'owner/repo',
+          42,
+          { config: {} },
+          {
+            spawn: fakeSpawn(
+              { exitCode: 1, stderr: 'HTTP 404: hook not found' },
+              recorder,
+            ),
+          },
+        ),
+      (err: SetupError) =>
+        err instanceof SetupError &&
+        err.userMessage.includes('gh api failed') &&
+        err.userMessage.includes('hook not found'),
+    )
+  })
+
+  test('ENOENT → SetupError with install hint', async () => {
+    const recorder = freshRecorder()
+    await assert.rejects(
+      () =>
+        ghUpdateHook(
+          'owner/repo',
+          1,
+          { config: {} },
+          { spawn: fakeSpawn({ errorCode: 'ENOENT' }, recorder) },
+        ),
+      (err: SetupError) =>
+        err instanceof SetupError && err.userMessage.includes('gh CLI not found'),
     )
   })
 })

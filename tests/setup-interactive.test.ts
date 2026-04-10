@@ -79,6 +79,7 @@ function scriptedIo({
 interface MockCounts {
   writeStateCalls: number
   ghCreateHookCalls: number
+  ghUpdateHookCalls: number
   writeMcpJsonCalls: number
   fetchSmeeCalls: number
 }
@@ -108,6 +109,9 @@ function buildDeps(
     ghCreateHook: async () => {
       counts.ghCreateHookCalls++
     },
+    ghUpdateHook: async () => {
+      counts.ghUpdateHookCalls++
+    },
     readMcpJson: () => overrides.mcpRead ?? { exists: false },
     writeMcpJson: () => {
       counts.writeMcpJsonCalls++
@@ -120,6 +124,7 @@ describe('interactive orchestrator — all-yes path', () => {
     const counts: MockCounts = {
       writeStateCalls: 0,
       ghCreateHookCalls: 0,
+      ghUpdateHookCalls: 0,
       writeMcpJsonCalls: 0,
       fetchSmeeCalls: 0,
     }
@@ -147,6 +152,7 @@ describe('interactive orchestrator — decline paths', () => {
     const counts: MockCounts = {
       writeStateCalls: 0,
       ghCreateHookCalls: 0,
+      ghUpdateHookCalls: 0,
       writeMcpJsonCalls: 0,
       fetchSmeeCalls: 0,
     }
@@ -170,6 +176,7 @@ describe('interactive orchestrator — decline paths', () => {
     const counts: MockCounts = {
       writeStateCalls: 0,
       ghCreateHookCalls: 0,
+      ghUpdateHookCalls: 0,
       writeMcpJsonCalls: 0,
       fetchSmeeCalls: 0,
     }
@@ -196,6 +203,7 @@ describe('interactive orchestrator — decline paths', () => {
     const counts: MockCounts = {
       writeStateCalls: 0,
       ghCreateHookCalls: 0,
+      ghUpdateHookCalls: 0,
       writeMcpJsonCalls: 0,
       fetchSmeeCalls: 0,
     }
@@ -220,6 +228,7 @@ describe('interactive orchestrator — decline paths', () => {
     const counts: MockCounts = {
       writeStateCalls: 0,
       ghCreateHookCalls: 0,
+      ghUpdateHookCalls: 0,
       writeMcpJsonCalls: 0,
       fetchSmeeCalls: 0,
     }
@@ -254,6 +263,7 @@ describe('interactive orchestrator — no prompts in --yes mode', () => {
     const counts: MockCounts = {
       writeStateCalls: 0,
       ghCreateHookCalls: 0,
+      ghUpdateHookCalls: 0,
       writeMcpJsonCalls: 0,
       fetchSmeeCalls: 0,
     }
@@ -278,6 +288,7 @@ describe('interactive orchestrator — dry-run bypasses confirmations', () => {
     const counts: MockCounts = {
       writeStateCalls: 0,
       ghCreateHookCalls: 0,
+      ghUpdateHookCalls: 0,
       writeMcpJsonCalls: 0,
       fetchSmeeCalls: 0,
     }

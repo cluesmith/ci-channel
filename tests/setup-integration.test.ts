@@ -66,6 +66,9 @@ function silentIo(): Io {
 interface TrackingMock {
   ghCreateHookCalls: number
   ghCreateHookLastPayload: object | null
+  ghUpdateHookCalls: number
+  ghUpdateHookLastPayload: object | null
+  ghUpdateHookLastHookId: number | null
   ghListHooksResult: GhHook[]
   fetchedSmeeUrl: string | null
 }
@@ -83,6 +86,11 @@ function buildDeps(projectRoot: string, mock: TrackingMock): InstallDeps {
     ghCreateHook: async (_repo, payload) => {
       mock.ghCreateHookCalls++
       mock.ghCreateHookLastPayload = payload
+    },
+    ghUpdateHook: async (_repo, hookId, payload) => {
+      mock.ghUpdateHookCalls++
+      mock.ghUpdateHookLastPayload = payload
+      mock.ghUpdateHookLastHookId = hookId
     },
     readMcpJson,
     writeMcpJson,
@@ -106,6 +114,9 @@ describe('setup integration (real fs)', () => {
     const mock: TrackingMock = {
       ghCreateHookCalls: 0,
       ghCreateHookLastPayload: null,
+      ghUpdateHookCalls: 0,
+      ghUpdateHookLastPayload: null,
+      ghUpdateHookLastHookId: null,
       ghListHooksResult: [],
       fetchedSmeeUrl: 'https://smee.io/deterministic-channel',
     }
@@ -151,6 +162,9 @@ describe('setup integration (real fs)', () => {
     const mock: TrackingMock = {
       ghCreateHookCalls: 0,
       ghCreateHookLastPayload: null,
+      ghUpdateHookCalls: 0,
+      ghUpdateHookLastPayload: null,
+      ghUpdateHookLastHookId: null,
       ghListHooksResult: [],
       fetchedSmeeUrl: 'https://smee.io/deterministic-channel',
     }
@@ -196,6 +210,9 @@ describe('setup integration (real fs)', () => {
     const mock: TrackingMock = {
       ghCreateHookCalls: 0,
       ghCreateHookLastPayload: null,
+      ghUpdateHookCalls: 0,
+      ghUpdateHookLastPayload: null,
+      ghUpdateHookLastHookId: null,
       ghListHooksResult: [],
       fetchedSmeeUrl: 'https://smee.io/x',
     }
@@ -240,6 +257,9 @@ describe('setup integration (real fs)', () => {
     const mock: TrackingMock = {
       ghCreateHookCalls: 0,
       ghCreateHookLastPayload: null,
+      ghUpdateHookCalls: 0,
+      ghUpdateHookLastPayload: null,
+      ghUpdateHookLastHookId: null,
       ghListHooksResult: [],
       fetchedSmeeUrl: 'https://smee.io/fresh',
     }
@@ -258,6 +278,9 @@ describe('setup integration (real fs)', () => {
     const mock: TrackingMock = {
       ghCreateHookCalls: 0,
       ghCreateHookLastPayload: null,
+      ghUpdateHookCalls: 0,
+      ghUpdateHookLastPayload: null,
+      ghUpdateHookLastHookId: null,
       ghListHooksResult: [],
       fetchedSmeeUrl: null,
     }

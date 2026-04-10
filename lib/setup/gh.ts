@@ -108,6 +108,47 @@ export async function ghCreateHook(
   }
 }
 
+/**
+ * Update an existing GitHub webhook's config in place.
+ *
+ * Invokes `gh api repos/{repo}/hooks/{hookId} --method PATCH --input -`
+ * with the payload piped to stdin. Same stdio invariant as
+ * ghCreateHook: dedicated stdin pipe, never inherits process.stdin.
+ *
+ * Used by the installer when a matching webhook URL already exists
+ * but the local secret has been regenerated (e.g., state.json was
+ * deleted and re-provisioned). Without this PATCH, the existing
+ * webhook would continue signing payloads with a stale secret that
+ * the runtime no longer has, and every event would fail HMAC
+ * validation — a silent broken install.
+ */
+export async function ghUpdateHook(
+  repo: string,
+  hookId: number,
+  payload: object,
+  deps: GhDeps = {},
+): Promise<void> {
+  const spawner = deps.spawn ?? spawn
+  const body = JSON.stringify(payload)
+  const result = await runGh(
+    spawner,
+    [
+      'api',
+      `repos/${repo}/hooks/${hookId}`,
+      '--method',
+      'PATCH',
+      '--input',
+      '-',
+    ],
+    body,
+  )
+  if (result.code !== 0) {
+    throw new SetupError(
+      `gh api failed (exit ${result.code}): ${result.stderr.trim()}`,
+    )
+  }
+}
+
 interface GhResult {
   code: number | null
   stdout: string

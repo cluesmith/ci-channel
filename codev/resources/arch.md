@@ -136,7 +136,7 @@ The installer is a pure addition to the codebase — no existing `lib/` file was
 | `project.ts` | `detectProjectRoot(cwd)` wrapper that throws `SetupError` if no `.mcp.json`/`.git/` found. |
 | `state.ts` | `readStateForSetup` (reuses `loadState`) + `writeStateForSetup` (own `writeFileSync` with `mode: 0o600` + explicit `chmodSync` to handle existing-file case) + `legacyGlobalStateExists` for the informational note. |
 | `gitignore.ts` | Ancestor-walking `.gitignore` matcher. Used to warn when `.claude/channels/ci/` is not ignored (state.json contains a secret). |
-| `gh.ts` | `gh` CLI wrapper. `ghListHooks` prefers `gh api --paginate --slurp` with a documented fallback to page-by-page parsing for older `gh` versions. `ghCreateHook` uses `stdio: ['pipe', 'pipe', 'pipe']` so the JSON payload can be written to a dedicated stdin pipe without inheriting `process.stdin`. |
+| `gh.ts` | `gh` CLI wrapper. `ghListHooks` prefers `gh api --paginate --slurp` with a documented fallback to page-by-page parsing for older `gh` versions. `ghCreateHook` (`POST`) and `ghUpdateHook` (`PATCH`) both use `stdio: ['pipe', 'pipe', 'pipe']` so the JSON payload can be written to a dedicated stdin pipe without inheriting `process.stdin`. `ghUpdateHook` is used to rotate the hook's secret in place when the installer generates a fresh secret and finds a matching URL — without it, the existing hook would keep signing with the lost secret and the runtime would fail HMAC validation on every event. |
 | `mcp-json.ts` | `readMcpJson` (I/O + JSON parse only) + `mergeCiServer` (pure function with all 7 fail-fast shape cases) + `writeMcpJson` (indent-preserving write). |
 | `io.ts` | Two `Io` implementations: `createAutoYesIo` (confirm → true, prompt throws) and `createInteractiveIo` (wraps `@inquirer/prompts` `confirm` + `input`). Converts inquirer errors (`ExitPromptError` → Ctrl-C exit 130) to `SetupError`. |
 | `orchestrator.ts` | `runInstall(args, deps, io)` — end-to-end flow with dependency injection. Handles all idempotency rows from the spec: state reuse, `--smee-url` override (secret reuse + old-webhook warning), skip state write when unchanged, dry-run semantics (read-only `ghListHooks` still runs, mutating ops skipped), conditional next-steps reminder (only when `.mcp.json` was created/merged), and confirmation prompts before each mutating step (smee provision, state write, webhook create, `.mcp.json` update). |
@@ -157,7 +157,12 @@ runSetup(argv)
         ├── writeState(projectRoot, state)  [skipped if unchanged; mode 0o600]
         ├── isGitignored check → io.warn if not ignored
         ├── ghListHooks(repo) → scan for matching smee URL
-        ├── ghCreateHook(repo, payload)  [skipped if match; POSTs via piped stdin]
+        ├── if matching hook && secret was freshly generated this run
+        │     → ghUpdateHook(repo, id, payload)  [PATCHes existing hook with new secret]
+        │   else if matching hook && secret reused from state
+        │     → skip (idempotent happy path)
+        │   else
+        │     → ghCreateHook(repo, payload)  [POSTs via piped stdin]
         ├── readMcpJson + mergeCiServer → {updated, action}
         ├── writeMcpJson  [skipped if action === 'skipped_exists']
         └── printNextSteps(action)  [conditional approval reminder]
