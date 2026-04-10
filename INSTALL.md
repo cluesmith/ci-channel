@@ -8,34 +8,26 @@ Step-by-step instructions for an LLM agent to install and configure ci-channel.
 - `gh` CLI installed and authenticated
 - Claude Code v2.1.80+ with channels support
 
-## Step 1: Clone and install
+## Step 1: Register the MCP server in the project you want to monitor
 
-```bash
-git clone https://github.com/cluesmith/ci-channel.git
-cd ci-channel
-npm install
-```
-
-## Step 2: Register the MCP server in the project you want to monitor
-
-From the project directory you want to monitor (NOT the ci-channel repo itself):
+From the project directory you want to monitor:
 
 ```bash
 cd /path/to/target-project
-claude mcp add-json --scope project ci '{"command":"npx","args":["tsx","server.ts"],"cwd":"ABSOLUTE_PATH_TO_CI_CHANNEL"}'
+claude mcp add-json --scope project ci '{"command":"npx","args":["-y","ci-channel"]}'
 ```
 
-Replace `ABSOLUTE_PATH_TO_CI_CHANNEL` with the absolute path where you cloned ci-channel (e.g., `/home/user/ci-channel`). Project scope means each project gets its own isolated smee channel and webhook.
+`npx -y ci-channel` downloads and runs the [ci-channel npm package](https://www.npmjs.com/package/ci-channel) on first invocation — no local clone needed. Project scope means each project gets its own isolated smee channel and webhook.
 
-## Step 3: Read the auto-provisioned credentials
-
-On first run, the plugin auto-generates a webhook secret and smee.io relay URL. These are saved to `~/.claude/channels/ci/state.json`. If the file doesn't exist yet, start Claude Code once with the channel flag to trigger provisioning:
+## Step 2: Launch Claude Code once to trigger auto-provisioning
 
 ```bash
 claude --dangerously-load-development-channels server:ci
 ```
 
-Then read the credentials:
+On first launch, the plugin generates a webhook secret and provisions a smee.io relay URL, saving them to `~/.claude/channels/ci/state.json`. Exit Claude Code after startup completes.
+
+## Step 3: Read the auto-provisioned credentials
 
 ```bash
 cat ~/.claude/channels/ci/state.json
@@ -69,7 +61,7 @@ Verify the webhook was created:
 gh api repos/OWNER/REPO/hooks --jq '.[].config.url'
 ```
 
-## Step 5: Launch Claude Code with the channel
+## Step 5: Relaunch Claude Code with the channel
 
 ```bash
 claude --dangerously-load-development-channels server:ci
@@ -79,10 +71,10 @@ The channel is now active. CI failure notifications will be pushed into the sess
 
 ## GitLab CI variant
 
-Replace step 2 with:
+Replace step 1 with:
 
 ```bash
-claude mcp add-json --scope project ci '{"command":"npx","args":["tsx","server.ts","--forge","gitlab","--repos","GROUP/PROJECT"],"cwd":"ABSOLUTE_PATH_TO_CI_CHANNEL"}'
+claude mcp add-json --scope project ci '{"command":"npx","args":["-y","ci-channel","--forge","gitlab","--repos","GROUP/PROJECT"]}'
 ```
 
 For the webhook (step 4), use the GitLab API or UI:
@@ -94,10 +86,10 @@ Optional: Install `glab` CLI for reconciliation and job enrichment.
 
 ## Gitea Actions variant
 
-Replace step 2 with:
+Replace step 1 with:
 
 ```bash
-claude mcp add-json --scope project ci '{"command":"npx","args":["tsx","server.ts","--forge","gitea","--gitea-url","https://YOUR_GITEA_INSTANCE","--repos","OWNER/REPO"],"cwd":"ABSOLUTE_PATH_TO_CI_CHANNEL"}'
+claude mcp add-json --scope project ci '{"command":"npx","args":["-y","ci-channel","--forge","gitea","--gitea-url","https://YOUR_GITEA_INSTANCE","--repos","OWNER/REPO"]}'
 ```
 
 Add a Gitea API token to `~/.claude/channels/ci/.env`:
