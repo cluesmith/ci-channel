@@ -1,6 +1,6 @@
 # Lessons Learned
 
-> Extracted from `codev/reviews/`. Last updated: 2026-04-04
+> Extracted from `codev/reviews/`. Last updated: 2026-04-10
 
 ## Testing
 
@@ -19,7 +19,7 @@ Writing tests in the same phase as the implementation makes review feedback easi
 ## Architecture
 
 ### MCP stdio pollution from child processes
-Any stdout from child processes (smee-client, gh CLI) corrupts the MCP JSON-RPC stream. **All subprocess calls must use `stdin: 'ignore'`** to prevent the child from inheriting and consuming MCP stdin bytes. Use `stdout: 'pipe'` or `'ignore'` and `stderr: 'ignore'` as well. This is the single most critical architectural constraint for MCP server plugins that spawn subprocesses. *(Spec 1, Phase 3)*
+Any stdout from child processes (smee-client, gh CLI) corrupts the MCP JSON-RPC stream. **The real invariant is: no child process may inherit `process.stdin`** (which would steal bytes from the MCP transport). The simplest way to achieve this for server-path subprocesses is `stdin: 'ignore'`. When a child needs a payload written to its stdin (e.g., `gh api --input -`), use `stdio: ['pipe', 'pipe', 'pipe']` and write to the child's dedicated stdin pipe — this also satisfies the invariant because the pipe is not `process.stdin`. Use `stdout: 'pipe'` or `'ignore'` and `stderr: 'ignore'` as well for server-path subprocesses. *(Spec 1, Phase 3; refined Spec 3, Phase 2)*
 
 ### Delay startup reconciliation until after MCP handshake
 Writing to stdout before the MCP `initialize` handshake completes corrupts the JSON-RPC stream. The plugin uses `setTimeout(5000)` to delay startup reconciliation. This ensures notifications are only sent after the transport is fully established. *(Spec 1)*
@@ -91,6 +91,38 @@ Sharing a smee.io URL across multiple projects causes cross-talk — all webhook
 
 ### Test the full pipeline end-to-end, not just unit tests
 Unit tests passed for months while the actual webhook → smee → local server → channel notification pipeline was broken in production (smee-client dying on startup). A manual integration test — triggering a real webhook and verifying the notification arrives — would have caught this immediately. *(Self-hosting, 2026-04-09)*
+
+## Interactive Installer (Spec 3)
+
+### Subcommand dispatch in ESM: place the guard after imports, not before
+Static `import` statements in ESM are hoisted and evaluated before any top-level code, regardless of textual placement. Trying to "run the subcommand guard before imports" by putting the `if` block at the top of the file is nonsense — the imports still resolve first. The correct pattern is to place the guard *after* all static imports but *before* any side-effecting top-level code (e.g., `const config = loadConfig()`). ESM also supports top-level `await`, so `await import('./lib/setup/index.js')` inside the guard works. The dynamic import is what prevents installer-only deps (`@inquirer/prompts`) from loading on the server path. *(Spec 3, Phase 1)*
+
+### `writeFileSync({ mode: 0o600 })` only applies on file creation
+POSIX file mode passed to `writeFileSync` options is only honored when the file is newly created. If the file already exists (e.g., from a previous run), the existing mode bits are preserved. For secret-containing files this is a correctness bug: a file that was ever written with permissive bits stays permissive forever. The fix is to follow the write with an explicit `chmodSync(path, 0o600)`. This introduces a small TOCTOU window on first-write only, which is acceptable for install-time tools. *(Spec 3, Phase 2)*
+
+### Don't reuse `saveState` from the runtime for installer writes
+`lib/state.ts`'s `saveState` swallows write errors with a log warning — correct for best-effort runtime persistence, wrong for an installer where a silent state-write failure followed by successful webhook creation leaves the user with unrecoverable inconsistent state. The installer must have its own write path that propagates errors. Convergent feedback from all three reviewers (Gemini/Codex/Claude) flagged this in the installer_core review — the convergence itself was a strong signal it was a real bug, not a nit. *(Spec 3, Phase 2)*
+
+### `gh api --paginate` output format is unreliable — prefer `--slurp`
+Plain `gh api --paginate` may return concatenated JSON documents rather than a single well-formed array, and the exact format varies across `gh` versions. `gh api --paginate --slurp` (available since gh 2.29, 2023-05) wraps all pages in a single top-level JSON array — always parseable with `JSON.parse`. For the ci-channel installer's idempotency check (does a matching webhook already exist?), `--slurp` is the primary path with a documented fallback to page-by-page parsing for pre-2.29 `gh`. *(Spec 3, Phase 2)*
+
+### State-write idempotency: diff-check before writing, not just after dry-run
+An idempotent re-run should leave the filesystem untouched when nothing has changed. The installer compares `existingState` (loaded at the start) to `state` (computed after secret/smee resolution) with a small `stateDiffers` helper and skips the write entirely when they match. This is a stricter form of idempotency than "don't overwrite valid state" — it also preserves mtime and avoids unnecessary disk I/O. Integration tests should assert `statSync().mtimeMs` is unchanged on re-runs, not just that the file contents are unchanged. *(Spec 3, Phase 2)*
+
+### Matrix checks that cross multiple axes need explicit per-cell tests
+The CLI parser's interactive/non-interactive matrix has 8 cells (TTY × `--yes` × `--repo`-missing). The initial implementation only checked the TTY condition inside the `--repo`-missing branch, leaving the non-TTY + `--repo` + no `--yes` cell reachable — which later failed inside `@inquirer/prompts` with a confusing error. The fix: test every cell explicitly, document the matrix as an ASCII table in the code comment, and structure the checks to mirror the matrix shape. If your parser has N × M × K behavior cells, write N × M × K tests. *(Spec 3, Phase 3)*
+
+### Confirmation prompts via dependency injection + scripted Io
+Rather than mocking `@inquirer/prompts` directly, abstract prompts behind an `Io` interface (`confirm`, `prompt`, `info`, `warn`) and provide two implementations: `createAutoYesIo` (for `--yes` and tests) and `createInteractiveIo` (wraps inquirer). Tests use a scripted `Io` that feeds canned answers from a queue. This keeps the tests fast, hermetic, and free of TTY-emulation dependencies. The orchestrator never imports inquirer — it only knows about `Io`. *(Spec 3, Phase 3)*
+
+### `UserDeclinedError extends SetupError` with exitCode 0
+A clean user decline ("no, don't create that webhook") is not an error — it's an expected path. Model it as a subclass of your error type with `exitCode = 0` so the `try/catch` pattern in the runner can handle it uniformly with regular errors while still exiting cleanly. The catch branch detects the subclass and prints a "(stopped by user)" suffix to distinguish it from a crash. *(Spec 3, Phase 3)*
+
+### Minimal `.gitignore` matcher is enough for a warning
+Full gitignore pattern matching is surprisingly complex (negation, anchored patterns, double-star globs, character classes). For a warning-only feature ("is `.claude/channels/ci/` mentioned in any ancestor `.gitignore`?"), a minimal implementation — walk ancestors, read each `.gitignore`, check for prefix/exact match after stripping leading/trailing slashes — is sufficient. Don't pull in a gitignore-parsing dependency for a warning that doesn't need pattern correctness. *(Spec 3, Phase 2)*
+
+### Dependency-inject `detectProjectRoot` in integration tests instead of mutating `process.cwd()`
+Changing `process.cwd()` in a test is unsafe under Node's concurrent test runner and can bleed into unrelated tests. Instead, inject the project root as a dep: `detectProjectRoot: () => tmpDir`. The `.git/` marker in the temp dir can still be created if you want to exercise the real `findProjectRoot` helper in a separate, cwd-independent sub-test. *(Spec 3, Phase 2)*
 
 ---
 
