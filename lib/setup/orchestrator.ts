@@ -1,6 +1,6 @@
 import { join } from 'node:path'
 import type { PluginState } from '../state.js'
-import { SetupError } from './errors.js'
+import { SetupError, UserDeclinedError } from './errors.js'
 import type { GhHook } from './gh.js'
 import type { McpJson, McpJsonReadResult } from './mcp-json.js'
 import { mergeCiServer } from './mcp-json.js'
@@ -124,6 +124,9 @@ export async function runInstall(
       )
     }
   } else if (stateChanged) {
+    if (!(await io.confirm(`Write credentials to ${statePath}?`))) {
+      throw new UserDeclinedError('Stopped before writing state.json.')
+    }
     deps.writeState(projectRoot, state)
     io.info(`[ci-channel setup] Wrote ${statePath} (mode 0o600)`)
   } else {
@@ -161,6 +164,9 @@ export async function runInstall(
       `[ci-channel setup] [dry-run] Would create GitHub webhook on ${args.repo} targeting ${expectedSmeeUrl}`,
     )
   } else {
+    if (!(await io.confirm(`Create GitHub webhook on ${args.repo}?`))) {
+      throw new UserDeclinedError('Stopped before webhook creation.')
+    }
     const payload = {
       config: {
         url: expectedSmeeUrl,
@@ -197,6 +203,13 @@ export async function runInstall(
       `[ci-channel setup] [dry-run] Would ${mcpAction === 'created' ? 'create' : 'update'} ${mcpPath}`,
     )
   } else {
+    if (
+      !(await io.confirm(
+        `${mcpAction === 'created' ? 'Create' : 'Update'} ${mcpPath} to register the ci MCP server?`,
+      ))
+    ) {
+      throw new UserDeclinedError('Stopped before updating .mcp.json.')
+    }
     deps.writeMcpJson(mcpPath, mcpUpdated, indent)
     io.info(
       `[ci-channel setup] ${mcpAction === 'created' ? 'Created' : 'Updated'} ${mcpPath}`,
@@ -267,6 +280,9 @@ async function resolveSmeeUrl(
     return false
   }
 
+  if (!(await io.confirm('Provision a new smee.io channel?'))) {
+    throw new UserDeclinedError('Stopped before provisioning smee channel.')
+  }
   const fetched = await deps.fetchSmeeChannel()
   if (!fetched) {
     throw new SetupError(

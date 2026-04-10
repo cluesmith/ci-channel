@@ -18,3 +18,18 @@ export class SetupError extends Error {
     this.exitCode = exitCode
   }
 }
+
+/**
+ * Thrown when the user declines an interactive confirmation prompt.
+ *
+ * Distinct from a regular SetupError so runSetup can treat it as a
+ * clean exit (code 0 — "the user said no, that's not an error") while
+ * still using the same catch path. runSetup recognizes
+ * UserDeclinedError and prints a "(stopped by user)" suffix.
+ */
+export class UserDeclinedError extends SetupError {
+  constructor(message: string) {
+    super(message, 0)
+    this.name = 'UserDeclinedError'
+  }
+}

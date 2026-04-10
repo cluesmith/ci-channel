@@ -1,9 +1,10 @@
 import { randomBytes } from 'node:crypto'
 import { fetchSmeeChannel } from '../bootstrap.js'
 import { parseSetupArgs, setupUsage } from './args.js'
-import { SetupError } from './errors.js'
+import { SetupError, UserDeclinedError } from './errors.js'
 import { ghCreateHook, ghListHooks } from './gh.js'
 import { isGitignored } from './gitignore.js'
+import { createAutoYesIo, createInteractiveIo } from './io.js'
 import { readMcpJson, writeMcpJson } from './mcp-json.js'
 import { runInstall, type InstallDeps, type Io } from './orchestrator.js'
 import { detectProjectRoot } from './project.js'
@@ -12,17 +13,25 @@ import {
   readStateForSetup,
   writeStateForSetup,
 } from './state.js'
+import type { SetupArgs } from './types.js'
+
+/** Repo validation regex (kept in sync with args.ts). */
+const REPO_REGEX = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/
+
+/** Maximum interactive attempts to accept a valid repo string. */
+const MAX_REPO_PROMPT_ATTEMPTS = 3
 
 /**
  * Entry point for the `ci-channel setup` subcommand.
  *
- * Phase 2 wires parseSetupArgs to the non-interactive installer core
- * (orchestrator + deps). Interactive prompts (for non-`--yes` runs) land
- * in Phase 3.
+ * Phase 3 wires the interactive `Io` when `--yes` is not passed and
+ * prompts for `--repo` when missing (only reachable in TTY mode per
+ * the parser matrix). All other behavior is inherited from Phase 2.
  *
- * Returns a process exit code. SetupError instances are caught and their
- * userMessage is written to stderr without a stack; any other error is
- * re-thrown for debuggability.
+ * Returns a process exit code. SetupError instances are caught and
+ * printed to stderr without a stack; `UserDeclinedError` is treated
+ * as a clean exit (code 0) with a "(stopped by user)" suffix; any
+ * other error is re-thrown for debuggability.
  */
 export async function runSetup(argv: string[]): Promise<number> {
   try {
@@ -32,26 +41,49 @@ export async function runSetup(argv: string[]): Promise<number> {
       return 0
     }
 
-    // Phase 2 scope guard: only --yes runs are supported in this phase.
-    // Phase 3 will add interactive prompts for non-`--yes` runs and
-    // prompt for --repo when missing in interactive mode.
-    if (!parsed.args.yes) {
-      throw new SetupError(
-        'Interactive mode not yet implemented — pass --yes to run non-interactively',
-      )
-    }
+    // Select I/O based on --yes. This instance is passed through to
+    // the orchestrator so prompt state is owned by a single object.
+    const io: Io = parsed.args.yes ? createAutoYesIo() : createInteractiveIo()
+
+    // If --repo is missing we're guaranteed (by parseSetupArgs) to be
+    // in TTY + !yes mode. Prompt interactively with regex validation.
+    const resolvedRepo = parsed.args.repo ?? (await promptForRepo(io))
+
+    const resolvedArgs: SetupArgs = { ...parsed.args, repo: resolvedRepo }
 
     const deps = buildInstallDeps()
-    const io = buildAutoYesIo()
-    await runInstall(parsed.args, deps, io)
+    await runInstall(resolvedArgs, deps, io)
     return 0
   } catch (err) {
+    if (err instanceof UserDeclinedError) {
+      console.error(`[ci-channel setup] ${err.userMessage} (stopped by user)`)
+      return err.exitCode
+    }
     if (err instanceof SetupError) {
       console.error(`[ci-channel setup] ${err.userMessage}`)
       return err.exitCode
     }
     throw err
   }
+}
+
+/**
+ * Prompt the user for a repo string. Re-prompts on invalid format up
+ * to MAX_REPO_PROMPT_ATTEMPTS times; throws SetupError after the cap
+ * to avoid infinite loops against a scripted-but-broken input.
+ *
+ * Exported for unit testing with a scripted Io. Production callers
+ * should go through `runSetup`.
+ */
+export async function promptForRepo(io: Io): Promise<string> {
+  for (let attempt = 0; attempt < MAX_REPO_PROMPT_ATTEMPTS; attempt++) {
+    const value = await io.prompt('Target GitHub repo (owner/repo):')
+    if (REPO_REGEX.test(value)) return value
+    io.warn(`Invalid repo format: ${value}. Expected owner/repo.`)
+  }
+  throw new SetupError(
+    `Too many invalid repo attempts (${MAX_REPO_PROMPT_ATTEMPTS}); aborting.`,
+  )
 }
 
 /**
@@ -72,24 +104,5 @@ function buildInstallDeps(): InstallDeps {
     ghCreateHook,
     readMcpJson,
     writeMcpJson,
-  }
-}
-
-/**
- * Phase 2 `Io` implementation: all `confirm` calls auto-return true
- * because Phase 2 only supports `--yes` mode. `prompt` throws because
- * it should never be called in non-interactive mode — Phase 3 will
- * provide an interactive variant.
- */
-function buildAutoYesIo(): Io {
-  return {
-    info: (msg) => console.error(msg),
-    warn: (msg) => console.error(msg),
-    confirm: async () => true,
-    prompt: async () => {
-      throw new SetupError(
-        'Internal error: interactive prompt requested in --yes mode',
-      )
-    },
   }
 }

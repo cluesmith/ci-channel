@@ -116,17 +116,27 @@ export function parseSetupArgs(
   const dryRun = bools['--dry-run'] === true
   const smeeUrl = values['--smee-url'] ?? null
 
-  // Interactive / non-interactive matrix.
-  if (repoRaw === null) {
-    if (yes) {
-      throw new SetupError('--yes requires --repo')
-    }
-    if (!isTty()) {
-      throw new SetupError(
-        'stdin is not a TTY; pass --yes (with --repo) to run non-interactively',
-      )
-    }
-    // TTY + !yes + no repo → valid; runner will prompt interactively.
+  // Interactive / non-interactive matrix:
+  //
+  //   TTY?  --yes?  --repo missing → behavior
+  //   yes   no      yes             → valid; runner will prompt for repo
+  //   yes   no      no              → valid; runner asks confirm-per-step
+  //   yes   yes     yes             → SetupError (--yes requires --repo)
+  //   yes   yes     no              → valid (non-interactive, all flags set)
+  //   no    no      any             → SetupError (stdin is not a TTY)
+  //   no    yes     yes             → SetupError (--yes requires --repo)
+  //   no    yes     no              → valid (non-interactive)
+  //
+  // The key rule: if `--yes` is NOT set, we are going to prompt at least
+  // for per-step confirmations, so a TTY is required regardless of
+  // whether --repo was passed.
+  if (!yes && !isTty()) {
+    throw new SetupError(
+      'stdin is not a TTY; pass --yes (with --repo) to run non-interactively',
+    )
+  }
+  if (repoRaw === null && yes) {
+    throw new SetupError('--yes requires --repo')
   }
 
   const args: SetupArgs = {

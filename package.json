@@ -42,6 +42,7 @@
     "test": "node --import tsx/esm --test --test-force-exit tests/*.test.ts tests/forges/*.test.ts"
   },
   "dependencies": {
+    "@inquirer/prompts": "8.4.1",
     "@modelcontextprotocol/sdk": "^1.12.1",
     "smee-client": "^2.0.4"
   },

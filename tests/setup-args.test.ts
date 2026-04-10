@@ -124,6 +124,29 @@ describe('parseSetupArgs', () => {
           err instanceof SetupError && err.userMessage.includes('stdin is not a TTY'),
       )
     })
+
+    test('non-TTY + no --yes + --repo → stdin is not a TTY (still fails, because per-step confirmations need a TTY)', () => {
+      // Regression test: previously the TTY check was only applied when
+      // --repo was missing, so `setup --repo owner/repo` on non-TTY
+      // stdin would parse successfully and then fail later inside the
+      // interactive Io. The check now applies whenever !yes, regardless
+      // of whether --repo was set.
+      assert.throws(
+        () =>
+          parseSetupArgs(['--repo', 'owner/repo'], { isTty: ttyFalse }),
+        (err: SetupError) =>
+          err instanceof SetupError &&
+          err.userMessage.includes('stdin is not a TTY'),
+      )
+    })
+
+    test('non-TTY + --yes + --repo → valid (fully non-interactive)', () => {
+      const result = parseSetupArgs(
+        ['--yes', '--repo', 'owner/repo'],
+        { isTty: ttyFalse },
+      )
+      assert.equal(result.kind, 'run')
+    })
   })
 
   describe('forge validation', () => {
