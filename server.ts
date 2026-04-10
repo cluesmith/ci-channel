@@ -17,6 +17,20 @@ import { gitlabForge } from "./lib/forges/gitlab.js";
 import { giteaForge } from "./lib/forges/gitea.js";
 import type { Forge } from "./lib/forge.js";
 
+// Subcommand dispatch: if we're running `ci-channel setup ...`, bypass the
+// MCP server entirely and hand control to the installer. Uses a dynamic
+// import so installer-only dependencies (@inquirer/prompts in later phases,
+// everything under lib/setup/**) are not loaded on the server path.
+//
+// ESM hoists the static imports above, so they still load on this path,
+// but they are side-effect-free module bindings — no loadConfig() runs,
+// no HTTP server starts, and no MCP handshake happens.
+if (process.argv[2] === "setup") {
+  const { runSetup } = await import("./lib/setup/index.js");
+  const exitCode = await runSetup(process.argv.slice(3));
+  process.exit(exitCode);
+}
+
 const initialConfig = loadConfig();
 
 // Select forge implementation based on config
