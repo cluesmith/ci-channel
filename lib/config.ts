@@ -55,18 +55,19 @@ const GLOBAL_ENV_PATH = join(homedir(), '.claude', 'channels', 'ci', '.env')
 /**
  * Resolves the default .env path:
  *  1. If a project root is detected (nearest .mcp.json or .git/), use
- *     <project-root>/.claude/channels/ci/.env
- *  2. Else if the legacy global .env exists, use it (backward compat)
- *  3. Else default to the project-scoped path under cwd
+ *     <project-root>/.claude/channels/ci/.env EVEN IF it doesn't exist.
+ *     We do NOT fall back to the legacy global path from inside a
+ *     project, because that would let a stale global WEBHOOK_SECRET or
+ *     SMEE_URL override freshly-installed project-local state written by
+ *     `ci-channel setup`, silently breaking new installs.
+ *  2. If no project root is detected AND the legacy global .env exists,
+ *     use it for backward compatibility with pre-project-scope installs.
+ *  3. Otherwise default to the project-scoped path under cwd.
  */
 export function getDefaultEnvPath(): string {
   const projectRoot = findProjectRoot()
   if (projectRoot) {
-    const projectEnv = join(projectRoot, '.claude', 'channels', 'ci', '.env')
-    // Prefer project-local; fall back to global only if project-local doesn't exist
-    if (existsSync(projectEnv)) return projectEnv
-    if (existsSync(GLOBAL_ENV_PATH)) return GLOBAL_ENV_PATH
-    return projectEnv
+    return join(projectRoot, '.claude', 'channels', 'ci', '.env')
   }
   if (existsSync(GLOBAL_ENV_PATH)) return GLOBAL_ENV_PATH
   return join(process.cwd(), '.claude', 'channels', 'ci', '.env')

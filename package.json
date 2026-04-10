@@ -33,7 +33,7 @@
     "channel-plugin"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=20.17.0"
   },
   "scripts": {
     "start": "node --import tsx/esm server.ts",

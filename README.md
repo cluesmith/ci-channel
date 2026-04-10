@@ -50,7 +50,7 @@ This runs an interactive installer that:
 - Prints the `claude --dangerously-load-development-channels server:ci` command to run
 
 Prerequisites:
-- Node.js v20+
+- Node.js v20.17.0 or later (required by `@inquirer/prompts` transitive deps)
 - `gh` CLI installed and authenticated with the `admin:repo_hook` scope
 - A git repo or an existing `.mcp.json` at the project root (so the installer can locate it)
 

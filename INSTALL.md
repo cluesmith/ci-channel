@@ -4,7 +4,7 @@ Step-by-step instructions for an LLM agent to install and configure ci-channel.
 
 ## Prerequisites
 
-- Node.js v20+
+- Node.js v20.17.0 or later (required by `@inquirer/prompts` transitive deps)
 - `gh` CLI installed and authenticated with the `admin:repo_hook` scope (for the recommended `setup` subcommand)
 - Claude Code v2.1.80+ with channels support
 
