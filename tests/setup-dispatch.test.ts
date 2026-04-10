@@ -84,18 +84,15 @@ describe('setup subcommand dispatch (source path)', () => {
     },
   )
 
-  test(
-    'setup --repo owner/repo --yes exits 0 in phase 1 scaffolding',
-    { timeout: 30000 },
-    () => {
-      // Phase 1 scaffolding prints "not yet implemented" and exits 0.
-      // Later phases will add real install behavior; this test locks the
-      // scaffolding contract so the dispatch path is exercised end-to-end.
-      const result = runSource(['--repo', 'owner/repo', '--yes'])
-      assert.equal(result.code, 0, `stderr: ${result.stderr}`)
-      assert.match(result.stderr, /parsed args/)
-    },
-  )
+  // Note: We intentionally do NOT spawn the full orchestrator end-to-end
+  // here (e.g., `setup --repo owner/repo --yes` or even with --dry-run).
+  // That path calls real `gh api` and real `fetchSmeeChannel`, neither of
+  // which is safe to invoke from a test runner. The three subprocess
+  // tests above already verify the dispatch reaches parseSetupArgs and
+  // the SetupError path, which is the full responsibility of the
+  // dispatch layer. Orchestrator behavior is covered by
+  // setup-orchestrator.test.ts and setup-integration.test.ts with
+  // injected deps.
 })
 
 describe('setup subcommand dispatch (built path)', () => {
