@@ -11,7 +11,7 @@ This project uses **[Codev](https://github.com/cluesmith/codev)** for AI-assiste
 See `codev/resources/arch.md` for the full architecture document.
 
 **Key components:**
-- `server.ts` — MCP server entry point (HTTP server, bootstrap, smee in-process, reconciliation)
+- `server.ts` — MCP server entry point + `setup` subcommand dispatch (HTTP server, bootstrap, smee in-process, reconciliation)
 - `lib/forge.ts` — Forge interface definition (strategy pattern for multi-forge support)
 - `lib/forges/github.ts` — GitHub Actions forge (HMAC-SHA256, workflow_run, gh CLI)
 - `lib/forges/gitlab.ts` — GitLab CI forge (token validation, Pipeline Hook, glab CLI)
@@ -22,6 +22,7 @@ See `codev/resources/arch.md` for the full architecture document.
 - `lib/webhook.ts` — WebhookEvent interface, deduplication, filtering (forge-agnostic)
 - `lib/notify.ts` — Notification formatting and input sanitization
 - `lib/reconcile.ts` — Startup reconciliation orchestration
+- `lib/setup/` — Interactive installer (`ci-channel setup` subcommand): arg parsing (`args.ts`), project detection (`project.ts`), state.json read/write with chmod 0o600 (`state.ts`), `.mcp.json` merger with 7-shape fail-fast matrix (`mcp-json.ts`), `gh` CLI wrapper (`gh.ts`), `.gitignore` ancestor check (`gitignore.ts`), `@inquirer/prompts` wrapper (`io.ts`), and orchestrator with confirmation prompts before every mutating step (`orchestrator.ts`)
 
 ## Configuration
 
@@ -44,10 +45,13 @@ Structural config via CLI args in `.mcp.json`, secrets in `~/.claude/channels/ci
 ## Development
 
 ```bash
-npm install          # Install dependencies
-npm test             # Run all tests (170 tests across 11 files)
-npx tsx server.ts    # Start the server
+npm install                                             # Install dependencies
+npm test                                                # Run all tests (291 tests across 15 files)
+npx tsx server.ts                                       # Start the server
+npx tsx server.ts setup --repo owner/repo --dry-run     # Dry-run the installer
 ```
+
+The `setup` subcommand source lives under `lib/setup/`. Dispatch happens at the top of `server.ts` after imports but before `loadConfig()`, via a dynamic `import('./lib/setup/index.js')` so installer-only dependencies (`@inquirer/prompts`) don't load on the server path.
 
 ## Codev Workflow
 
@@ -75,7 +79,7 @@ Commit message format:
 
 ## Critical Patterns
 
-- **MCP stdio isolation**: All subprocess calls must use `stdin: 'ignore'` to prevent consuming MCP stdin bytes. See `codev/resources/lessons-learned.md`.
+- **MCP stdio isolation**: Subprocesses spawned by the running MCP server must not inherit `process.stdin` (or they'd steal bytes from the JSON-RPC stream). Default pattern: `stdin: 'ignore'`. Exception: the `ci-channel setup` installer's `gh api --input -` call uses `stdio: ['pipe', 'pipe', 'pipe']` to pipe a JSON payload — this also satisfies the invariant since the child gets a dedicated pipe rather than the parent's stdin. The rule is "don't inherit `process.stdin`", not literally "`stdin: 'ignore'` everywhere". See `codev/resources/lessons-learned.md`.
 - **Sanitize at the boundary**: All user-controlled input (commit messages, branch names) must be sanitized in `notify.ts` before reaching MCP.
 - **Never block on enrichment**: Job-detail enrichment is fire-and-forget, never blocks the primary notification.
 - **Forge strategy pattern**: All forge-specific behavior (signature validation, event parsing, reconciliation, enrichment) goes in `lib/forges/`. The handler and reconciler are forge-agnostic.

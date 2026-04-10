@@ -1,6 +1,6 @@
 # CI Channel — Architecture
 
-> Last updated: 2026-04-09
+> Last updated: 2026-04-10
 
 ## Overview
 
@@ -16,13 +16,14 @@ A Claude Code channel plugin that receives CI/CD webhook events from multiple fo
 | Transport | stdio (MCP) + HTTP (webhooks) | — |
 | Testing | node:test (built-in) | Node 20+ |
 | Webhook proxy | smee-client (in-process) | ^2.0.4 |
+| Interactive prompts | @inquirer/prompts (installer only) | 8.4.1 (pinned) |
 | CLI dependencies | gh, glab (optional) | — |
 
 ## Directory Structure
 
 ```
 ci-channel/
-├── server.ts                  # Entry point: MCP server + HTTP server + bootstrap + reconciliation
+├── server.ts                  # Entry point: setup dispatch + MCP server + HTTP server + bootstrap + reconciliation
 ├── lib/
 │   ├── forge.ts               # Forge interface definition (strategy pattern)
 │   ├── forges/
@@ -36,7 +37,19 @@ ci-channel/
 │   ├── handler.ts             # Webhook handler pipeline (orchestrates the flow)
 │   ├── webhook.ts             # WebhookEvent interface, dedup, filtering (forge-agnostic)
 │   ├── notify.ts              # Notification formatting, sanitization, MCP push
-│   └── reconcile.ts           # Startup reconciliation orchestration
+│   ├── reconcile.ts           # Startup reconciliation orchestration
+│   └── setup/                 # Interactive installer (`ci-channel setup` subcommand)
+│       ├── index.ts           # runSetup entry point + promptForRepo loop + dep wiring
+│       ├── args.ts            # parseSetupArgs with interactive/non-interactive matrix
+│       ├── types.ts           # SetupArgs + ParseSetupArgsResult (discriminated union)
+│       ├── errors.ts          # SetupError + UserDeclinedError (clean-exit subclass)
+│       ├── project.ts         # detectProjectRoot wrapper around findProjectRoot
+│       ├── state.ts           # Project-local state read/write with chmod 0o600
+│       ├── gitignore.ts       # Ancestor-walking .gitignore matcher (warning-only)
+│       ├── gh.ts              # gh CLI wrapper: ghListHooks (--slurp + fallback), ghCreateHook (piped stdin)
+│       ├── mcp-json.ts        # .mcp.json read/merge/write with 7-shape fail-fast matrix
+│       ├── io.ts              # Io implementations: createAutoYesIo + createInteractiveIo (@inquirer/prompts)
+│       └── orchestrator.ts    # runInstall end-to-end flow with dependency injection + confirm prompts
 ├── tests/
 │   ├── forges/
 │   │   ├── gitlab.test.ts     # GitLab forge unit tests
@@ -50,6 +63,14 @@ ci-channel/
 │   ├── integration-gitlab.test.ts  # GitLab HTTP pipeline end-to-end
 │   ├── integration-gitea.test.ts   # Gitea HTTP pipeline end-to-end
 │   ├── stdio-lifecycle.test.ts     # MCP stdio stability regression
+│   ├── setup-args.test.ts     # Installer arg parser matrix
+│   ├── setup-dispatch.test.ts # Subcommand dispatch smoke tests (source + built dist)
+│   ├── setup-mcp-json.test.ts # .mcp.json 7-shape matrix
+│   ├── setup-gh.test.ts       # gh wrapper with injected spawn
+│   ├── setup-orchestrator.test.ts # runInstall all idempotency rows
+│   ├── setup-integration.test.ts  # Real-fs integration (chmod 0o600, idempotent re-run)
+│   ├── setup-interactive.test.ts  # Confirmation prompts, decline paths (scripted Io)
+│   ├── setup-io-tty.test.ts   # TTY matrix + promptForRepo loop
 │   └── fixtures/
 │       ├── workflow-run-failure.json      # GitHub webhook payload
 │       ├── gitlab-pipeline-failure.json   # GitLab webhook payload
@@ -86,9 +107,10 @@ Each forge implements:
 
 ### MCP Server (`server.ts`)
 
-**Purpose**: Entry point that wires everything together.
+**Purpose**: Entry point that wires everything together, plus top-of-file dispatch to the `setup` subcommand.
 
 Responsibilities:
+- **Subcommand dispatch** (before any other runtime code): if `process.argv[2] === 'setup'`, dynamically import `lib/setup/index.js` and delegate to `runSetup`. The dynamic import keeps installer-only dependencies (`@inquirer/prompts`) off the server path. ESM hoists the static imports, so the dispatch check happens after imports resolve but before `loadConfig()` and any other side-effecting code.
 - Creates MCP `Server` with `claude/channel` capability and instructions
 - Connects via `StdioServerTransport`
 - Selects forge implementation based on `--forge` config
@@ -97,6 +119,50 @@ Responsibilities:
 - Starts smee-client in-process via Node.js API
 - Triggers delayed startup reconciliation (5s after MCP handshake)
 
+### Interactive Installer (`lib/setup/`)
+
+**Purpose**: Replace the legacy five-step manual install flow (register MCP → launch → read state → create webhook → relaunch) with a single command: `npx ci-channel setup --repo owner/repo`. GitHub-only in v1; GitLab/Gitea users fall back to the manual flow documented in INSTALL.md.
+
+The installer is a pure addition to the codebase — no existing `lib/` file was modified. It reuses `findProjectRoot` from `lib/project-root.ts`, `loadState` from `lib/state.ts` (for reads), and `fetchSmeeChannel` from `lib/bootstrap.ts`. Notably it does **not** reuse `saveState`, which swallows write errors — the installer needs error-propagating writes with an explicit `chmod 0o600` on the state file.
+
+**Modules** (all under `lib/setup/`):
+
+| File | Purpose |
+|------|---------|
+| `index.ts` | `runSetup(argv)` entry point. Selects `Io` based on `--yes`, prompts for missing repo via `promptForRepo`, builds real `InstallDeps`, calls `runInstall`. Catches `SetupError`/`UserDeclinedError` for clean stderr output. |
+| `args.ts` | `parseSetupArgs(argv, {isTty})` — full flag set with interactive/non-interactive matrix. Returns discriminated union `{ kind: 'run', args } \| { kind: 'help' }`. Throws `SetupError` for invalid input. |
+| `types.ts` | `SetupArgs` type + `ParseSetupArgsResult` discriminated union. |
+| `errors.ts` | `SetupError` (userMessage + exitCode) + `UserDeclinedError extends SetupError` (exitCode 0) for clean decline exits. |
+| `project.ts` | `detectProjectRoot(cwd)` wrapper that throws `SetupError` if no `.mcp.json`/`.git/` found. |
+| `state.ts` | `readStateForSetup` (reuses `loadState`) + `writeStateForSetup` (own `writeFileSync` with `mode: 0o600` + explicit `chmodSync` to handle existing-file case) + `legacyGlobalStateExists` for the informational note. |
+| `gitignore.ts` | Ancestor-walking `.gitignore` matcher. Used to warn when `.claude/channels/ci/` is not ignored (state.json contains a secret). |
+| `gh.ts` | `gh` CLI wrapper. `ghListHooks` prefers `gh api --paginate --slurp` with a documented fallback to page-by-page parsing for older `gh` versions. `ghCreateHook` uses `stdio: ['pipe', 'pipe', 'pipe']` so the JSON payload can be written to a dedicated stdin pipe without inheriting `process.stdin`. |
+| `mcp-json.ts` | `readMcpJson` (I/O + JSON parse only) + `mergeCiServer` (pure function with all 7 fail-fast shape cases) + `writeMcpJson` (indent-preserving write). |
+| `io.ts` | Two `Io` implementations: `createAutoYesIo` (confirm → true, prompt throws) and `createInteractiveIo` (wraps `@inquirer/prompts` `confirm` + `input`). Converts inquirer errors (`ExitPromptError` → Ctrl-C exit 130) to `SetupError`. |
+| `orchestrator.ts` | `runInstall(args, deps, io)` — end-to-end flow with dependency injection. Handles all idempotency rows from the spec: state reuse, `--smee-url` override (secret reuse + old-webhook warning), skip state write when unchanged, dry-run semantics (read-only `ghListHooks` still runs, mutating ops skipped), conditional next-steps reminder (only when `.mcp.json` was created/merged), and confirmation prompts before each mutating step (smee provision, state write, webhook create, `.mcp.json` update). |
+
+**Flow** (for a non-dry-run, `--yes` install):
+
+```
+runSetup(argv)
+    ├── parseSetupArgs → { kind: 'run', args }
+    ├── io = createAutoYesIo()
+    ├── deps = buildInstallDeps()
+    └── runInstall(args, deps, io)
+        ├── detectProjectRoot()
+        ├── legacyGlobalStateExists() → informational note (if true)
+        ├── readState() → existingState
+        ├── resolveSecret:   generate 256-bit or reuse existing
+        ├── resolveSmeeUrl:  --smee-url override | reuse | fetchSmeeChannel
+        ├── writeState(projectRoot, state)  [skipped if unchanged; mode 0o600]
+        ├── isGitignored check → io.warn if not ignored
+        ├── ghListHooks(repo) → scan for matching smee URL
+        ├── ghCreateHook(repo, payload)  [skipped if match; POSTs via piped stdin]
+        ├── readMcpJson + mergeCiServer → {updated, action}
+        ├── writeMcpJson  [skipped if action === 'skipped_exists']
+        └── printNextSteps(action)  [conditional approval reminder]
+```
+
 ### Configuration (`lib/config.ts`)
 
 **Purpose**: Loads and validates settings from CLI args, env vars, and `.env` file.
@@ -104,12 +170,14 @@ Responsibilities:
 Sources (in priority order):
 1. CLI args (`process.argv` — `--forge`, `--repos`, `--port`, etc.)
 2. Environment variables (`process.env`)
-3. File: `~/.claude/channels/ci/.env` (user-supplied secrets only)
-4. File: `~/.claude/channels/ci/state.json` (auto-provisioned state — lowest priority)
+3. File: `<project-root>/.claude/channels/ci/.env` (user-supplied secrets only)
+4. File: `<project-root>/.claude/channels/ci/state.json` (auto-provisioned state — lowest priority)
+
+Project root is detected by walking up from `process.cwd()` looking for `.mcp.json` or `.git/`. If no project root is found, both paths fall back to the legacy global location `~/.claude/channels/ci/` for backward compatibility with pre-project-scope installs.
 
 Key config fields: `forge`, `webhookSecret` (nullable — auto-generated), `port` (default 0), `repos`, `smeeUrl`, `giteaUrl`, `giteaToken`.
 
-The `.env` file is only ever touched by the user. `state.json` is only ever touched by the plugin.
+The `.env` file is only ever touched by the user. `state.json` is only ever touched by the plugin (bootstrap on first run, or `ci-channel setup` via `lib/setup/state.ts`).
 
 ### Bootstrap (`lib/bootstrap.ts`)
 
@@ -122,7 +190,7 @@ Flow:
 4. Start smee-client in-process
 5. Push setup notification via MCP channel
 
-Auto-provisioned state (generated secret, smee URL) is persisted to `~/.claude/channels/ci/state.json`, not `.env`. The `.env` file is reserved for user-supplied secrets. All bootstrap side effects are injectable via `BootstrapDeps` interface for testability.
+Auto-provisioned state (generated secret, smee URL) is persisted to `<project-root>/.claude/channels/ci/state.json` (project-local, with a fallback to the legacy global path `~/.claude/channels/ci/` when no project root is detected). The `.env` file is reserved for user-supplied secrets and is never written by the plugin or the installer. All bootstrap side effects are injectable via `BootstrapDeps` interface for testability.
 
 ### Webhook Handler (`lib/handler.ts`)
 
@@ -217,7 +285,7 @@ server.ts starts
 3. **Repository allowlist** — Defense-in-depth on top of signature validation.
 4. **Input sanitization** — All user-controlled fields escaped and truncated before inclusion in notifications.
 5. **Deduplication** — Bounded 100-entry set prevents replay.
-6. **Subprocess isolation** — All child processes use `stdin: 'ignore'` to prevent MCP stdio corruption.
+6. **Subprocess isolation** — No child process inherits `process.stdin`, which would steal bytes from the MCP JSON-RPC stream. Server-path subprocesses use `stdin: 'ignore'`; the `setup` installer's `ghCreateHook` uses `stdio: ['pipe', 'pipe', 'pipe']` with a dedicated stdin pipe for `gh api --input -`. Both satisfy the invariant.
 7. **No stdin event handlers** — `process.stdin.on("close")` must never be used in MCP stdio servers; it kills long-lived in-process connections (smee-client EventSource).
 
 ## Conventions
@@ -231,4 +299,4 @@ server.ts starts
 
 ---
 
-*Updated for Spec 1 (multi-forge support). To update: run MAINTAIN or edit directly.*
+*Updated for Spec 3 (interactive installer). To update: run MAINTAIN or edit directly.*

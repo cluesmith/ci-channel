@@ -30,66 +30,45 @@ Forge (GitHub/GitLab/Gitea)
 └───────────────────┘
 ```
 
-## Zero-Config Quick Start
+## Installation
 
-> **NOTE:** Claude Channels is still a new feature so config is a bit complicated.
->
-> **LLM agents**: See [INSTALL.md](INSTALL.md) for step-by-step installation instructions designed for AI agents to follow programmatically.
+### Quick install (recommended — GitHub only)
 
-The plugin auto-generates a webhook secret and provisions a smee.io relay on first run. You just need to:
-
-### 1. Register the MCP server in your project
-
-From the project you want to monitor:
+From inside the project you want to monitor:
 
 ```bash
-cd /path/to/your-project
-claude mcp add-json --scope project ci '{"command":"npx","args":["-y","ci-channel"]}'
+npx ci-channel setup --repo owner/your-project
 ```
 
-This adds ci-channel to your project's `.mcp.json`. `npx` downloads and runs it on first invocation — no clone or local install required. Each project gets its own dedicated smee channel and webhook — no cross-talk between projects.
+This runs an interactive installer that:
 
-> **Installing from source instead?** See [Development Setup](#development-setup) at the bottom of this doc.
+- Walks up from cwd to find the project root (`.mcp.json` or `.git/`)
+- Provisions a smee.io channel and generates a webhook secret
+- Writes credentials to `<project-root>/.claude/channels/ci/state.json` (mode `0o600`)
+- Creates the GitHub webhook via `gh api`
+- Registers the `ci` MCP server in `.mcp.json`
+- Prints the `claude --dangerously-load-development-channels server:ci` command to run
 
-### 2. Start Claude Code with the channel enabled
+Prerequisites:
+- Node.js v20+
+- `gh` CLI installed and authenticated with the `admin:repo_hook` scope
+- A git repo or an existing `.mcp.json` at the project root (so the installer can locate it)
+
+Useful flags:
 
 ```bash
-claude --dangerously-load-development-channels server:ci
+npx ci-channel setup --repo owner/repo --yes      # Skip all confirmation prompts (scripting / agents)
+npx ci-channel setup --repo owner/repo --dry-run  # Preview every planned action without executing
+npx ci-channel setup --help                       # Show the full option list
 ```
 
-On first run, the plugin:
-1. Generates a `WEBHOOK_SECRET` and provisions a smee.io relay channel
-2. Saves auto-provisioned state to `<project-root>/.claude/channels/ci/state.json` (per-project, persists across restarts)
-3. Sends a channel notification to Claude with the webhook URL and secret:
+Re-running `setup` on an already-configured project is safe: it detects existing state, skips duplicate webhooks, and leaves `.mcp.json` alone if the `ci` entry is already present.
 
-```
-CI channel ready. Configure your forge webhook:
-  URL: https://smee.io/abc123
-  Secret: a1b2c3d4...
-  Events: Workflow runs (GitHub/Gitea) or Pipeline events (GitLab)
-```
+For **GitLab**, **Gitea**, or advanced/manual workflows, see the per-forge sections below or [INSTALL.md](./INSTALL.md) for the full manual flow.
 
-### 3. Configure your forge webhook (one-time)
+### Manual install (any forge)
 
-Copy the URL and secret from the notification and configure your forge's webhook. For GitHub, you can use the `gh` CLI:
-
-```bash
-gh api repos/OWNER/REPO/hooks --method POST --input - <<'EOF'
-{
-  "config": {
-    "url": "https://smee.io/YOUR_CHANNEL_URL",
-    "content_type": "json",
-    "secret": "YOUR_WEBHOOK_SECRET"
-  },
-  "events": ["workflow_run"],
-  "active": true
-}
-EOF
-```
-
-Or configure it manually in the GitHub UI (see [Per-Forge Setup Guides](#per-forge-setup-guides) below).
-
-That's it. No `.env` file to create manually, no browser visit to smee.io.
+If you can't use `setup` (GitLab, Gitea, or an environment without `gh`), the plugin still supports the original zero-config flow: add the MCP server to `.mcp.json`, start Claude Code, and the plugin auto-provisions the secret and smee channel on first run. See [INSTALL.md](./INSTALL.md) for the step-by-step manual install instructions.
 
 ## Per-Forge Setup Guides
 
@@ -128,8 +107,9 @@ Or manually: **Settings > Webhooks > Add webhook**
 | **Secret** | The secret from the notification |
 | **Events** | Select **"Workflow runs"** only |
 
-**`.env` file** (`<project-root>/.claude/channels/ci/.env`): auto-generated on first run. If configuring manually:
+**State**: The auto-generated webhook secret and smee URL are written to `<project-root>/.claude/channels/ci/state.json` (mode `0o600`). The installer does **not** write `.env` — that file is reserved for user-supplied overrides:
 ```env
+# Optional: override the auto-generated secret
 WEBHOOK_SECRET=your-webhook-secret
 ```
 
@@ -155,8 +135,9 @@ For nested namespaces, use the exact `path_with_namespace` value: `--repos "grou
 | **Secret token** | The secret from the notification |
 | **Trigger** | Check **Pipeline events** only |
 
-**`.env` file** (`<project-root>/.claude/channels/ci/.env`): auto-generated on first run. If configuring manually:
+**State**: The auto-generated secret token and smee URL are written to `<project-root>/.claude/channels/ci/state.json` (mode `0o600`). The `.env` file is not written by the plugin; use it only for user-supplied overrides:
 ```env
+# Optional: override the auto-generated token
 WEBHOOK_SECRET=your-gitlab-secret-token
 ```
 
@@ -185,10 +166,12 @@ GITEA_TOKEN=your-gitea-api-token
 | **Secret** | The secret from the notification |
 | **Events** | Select **"Workflow runs"** |
 
-**`.env` file** (`<project-root>/.claude/channels/ci/.env`):
+**State**: The auto-generated webhook secret and smee URL are written to `<project-root>/.claude/channels/ci/state.json` (mode `0o600`). The `.env` file is only used for user-supplied secrets like the Gitea API token:
 ```env
-WEBHOOK_SECRET=your-webhook-secret
+# .env (user-managed — not written by the plugin)
 GITEA_TOKEN=your-gitea-api-token
+# Optional: override the auto-generated webhook secret
+WEBHOOK_SECRET=your-webhook-secret
 ```
 
 **Note**: `--gitea-url` is required for startup reconciliation and job enrichment (uses the Gitea API directly). `GITEA_TOKEN` enables authenticated API access.
@@ -218,7 +201,7 @@ claude mcp add-json --scope project ci '{"command":"npx","args":["-y","ci-channe
 
 The architect session will now receive CI notifications in real-time. Builders don't need the channel — they focus on implementation.
 
-**Step 3: Configure the webhook** for your repo (see [Quick Start](#zero-config-quick-start) step 4).
+**Step 3: Configure the webhook** for your repo — run `npx ci-channel setup --repo owner/your-repo --yes` to register the webhook in one shot, or follow the manual flow in [INSTALL.md](./INSTALL.md).
 
 **Filtering**: Project scope naturally isolates each project, but if you want to further limit notifications to specific repos, add `--repos` to the MCP server args:
 ```bash
@@ -377,13 +360,13 @@ If the CLI/API is unavailable, the plugin logs a warning and continues — live 
 
 ## Development Setup
 
-Most users should install via `npx ci-channel` (see [Quick Start](#zero-config-quick-start)). This section is for contributors and people who want to run ci-channel from source.
+Most users should install via `npx ci-channel` (see [Quick Start](#installation)). This section is for contributors and people who want to run ci-channel from source.
 
 ```bash
 git clone https://github.com/cluesmith/ci-channel.git
 cd ci-channel
 npm install
-npm test             # Run all tests (173 tests across 12 files)
+npm test             # Run all tests (291 tests across 19 files)
 npm run build        # Build to dist/
 npx tsx server.ts    # Run from source
 ```

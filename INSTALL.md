@@ -5,10 +5,69 @@ Step-by-step instructions for an LLM agent to install and configure ci-channel.
 ## Prerequisites
 
 - Node.js v20+
-- `gh` CLI installed and authenticated
+- `gh` CLI installed and authenticated with the `admin:repo_hook` scope (for the recommended `setup` subcommand)
 - Claude Code v2.1.80+ with channels support
 
-## Step 1: Register the MCP server in the project you want to monitor
+## Recommended: `ci-channel setup` (GitHub only)
+
+For GitHub repos, a single command replaces the entire manual flow below:
+
+```bash
+cd /path/to/target-project
+npx ci-channel setup --repo OWNER/REPO --yes
+```
+
+This:
+
+1. Walks up from `cwd` to find the project root (`.mcp.json` or `.git/`).
+2. Provisions a fresh smee.io channel and generates a 256-bit webhook secret.
+3. Writes `<project-root>/.claude/channels/ci/state.json` with mode `0o600`.
+4. Creates the GitHub webhook via `gh api repos/OWNER/REPO/hooks POST` (subscribed to `workflow_run`).
+5. Updates `<project-root>/.mcp.json` to register the `ci` MCP server (idempotent — no duplicate entries).
+6. Prints the next-steps guidance, including the `claude --dangerously-load-development-channels server:ci` command to launch.
+
+Flag summary:
+
+| Flag | Purpose |
+|------|---------|
+| `--repo OWNER/REPO` | Target repository (required for GitHub) |
+| `--yes`, `-y` | Skip all confirmation prompts (agents + scripts) |
+| `--dry-run` | Print every planned action without executing — no network mutations, no file writes |
+| `--smee-url URL` | Reuse an existing smee.io channel instead of provisioning a new one |
+| `--help`, `-h` | Show full help and exit |
+
+Idempotency: re-running `setup` on an already-configured project is safe. The installer detects existing `state.json`, skips creating a duplicate webhook, and leaves `.mcp.json` alone if the `ci` entry is already present.
+
+**GitLab / Gitea note**: The `setup` subcommand only supports GitHub in v1. The MCP server itself supports all three forges — for GitLab or Gitea installs, follow the manual flow in the next section.
+
+### Verification
+
+After `setup` completes, launch Claude Code with the channel flag:
+
+```bash
+claude --dangerously-load-development-channels server:ci
+```
+
+The `ci` MCP server should appear in `claude mcp list`. Trigger a CI failure (push a commit with a broken test) and a `<channel source="ci" ...>` notification should appear in your session.
+
+### `setup` troubleshooting
+
+- **`gh CLI not found`** — Install from https://cli.github.com/ and run `gh auth login`.
+- **`gh api failed (exit 1): HTTP 404: Not Found`** — The repo doesn't exist, your `gh` token lacks access, or you don't have admin on the repo.
+- **`gh api failed (exit 1): HTTP 403: Resource not accessible`** — Your `gh` token needs the `admin:repo_hook` scope. Re-run `gh auth login --scopes admin:repo_hook`.
+- **`Could not locate project root`** — Run `setup` from inside a directory that contains (or is nested under) a `.git/` or `.mcp.json`.
+- **`stdin is not a TTY; pass --yes`** — Running non-interactively (e.g., in CI or piped stdin) requires `--yes` to skip confirmation prompts.
+- **`.mcp.json is not valid JSON`** — The file exists but has invalid JSON syntax. Fix it manually and re-run `setup`.
+- **`.mcp.json has invalid mcpServers`** — The file's `mcpServers` key is not an object. Fix it manually and re-run `setup`.
+- **`Warning: .claude/channels/ci/ is not in .gitignore`** — The installer writes a secret to `state.json`; add `.claude/channels/ci/` to your `.gitignore` before committing.
+
+---
+
+## Manual install (advanced / troubleshooting / GitLab / Gitea)
+
+Use this flow if you need GitLab/Gitea, if `gh` isn't available, or if you want fine-grained control over the setup.
+
+### Step 1: Register the MCP server in the project you want to monitor
 
 From the project directory you want to monitor:
 
@@ -23,7 +82,7 @@ claude mcp add-json --scope project ci '{"command":"npx","args":["-y","ci-channe
 
 > **Project-scoped servers need explicit approval.** After `claude mcp add-json --scope project`, the server is dormant until you either (a) approve it via `/mcp` inside a Claude Code session, or (b) add the key to `enabledMcpjsonServers` in `~/.claude.json`. Install can appear to succeed while the server silently stays unloaded. If unsure, use `--scope user` instead.
 
-## Step 2: Launch Claude Code once to trigger auto-provisioning
+### Step 2: Launch Claude Code once to trigger auto-provisioning
 
 ```bash
 claude --dangerously-load-development-channels server:ci
@@ -31,7 +90,7 @@ claude --dangerously-load-development-channels server:ci
 
 On first launch, the plugin generates a webhook secret and provisions a smee.io relay URL, saving them to `.claude/channels/ci/state.json`. Exit Claude Code after startup completes.
 
-## Step 3: Read the auto-provisioned credentials
+### Step 3: Read the auto-provisioned credentials
 
 ```bash
 cat .claude/channels/ci/state.json
@@ -41,7 +100,7 @@ This returns JSON with `webhookSecret` and `smeeUrl` fields.
 
 If `.claude/channels/ci/.env` exists with `WEBHOOK_SECRET` and `SMEE_URL` already set, use those values instead.
 
-## Step 4: Create the GitHub webhook
+### Step 4: Create the GitHub webhook
 
 Use the `gh` CLI to create the webhook programmatically. Replace `OWNER/REPO` with the target repository, and substitute the smee URL and secret from step 3:
 
@@ -65,7 +124,7 @@ Verify the webhook was created:
 gh api repos/OWNER/REPO/hooks --jq '.[].config.url'
 ```
 
-## Step 5: Relaunch Claude Code with the channel
+### Step 5: Relaunch Claude Code with the channel
 
 ```bash
 claude --dangerously-load-development-channels server:ci
