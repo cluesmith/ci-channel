@@ -19,7 +19,7 @@
   "scripts": {
     "start": "node --import tsx/esm server.ts",
     "build": "echo 'No build step — tsx runs TypeScript directly'",
-    "test": "node --import tsx/esm --test tests/*.test.ts tests/forges/*.test.ts"
+    "test": "node --import tsx/esm --test --test-force-exit tests/*.test.ts tests/forges/*.test.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
