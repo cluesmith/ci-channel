@@ -16,13 +16,16 @@ cd ci-channel
 npm install
 ```
 
-## Step 2: Register the MCP server
+## Step 2: Register the MCP server in the project you want to monitor
+
+From the project directory you want to monitor (NOT the ci-channel repo itself):
 
 ```bash
-claude mcp add-json --scope user ci '{"command":"npx","args":["tsx","server.ts"],"cwd":"ABSOLUTE_PATH_TO_CI_CHANNEL"}'
+cd /path/to/target-project
+claude mcp add-json --scope project ci '{"command":"npx","args":["tsx","server.ts"],"cwd":"ABSOLUTE_PATH_TO_CI_CHANNEL"}'
 ```
 
-Replace `ABSOLUTE_PATH_TO_CI_CHANNEL` with the absolute path where you cloned the repo (e.g., `/home/user/ci-channel`).
+Replace `ABSOLUTE_PATH_TO_CI_CHANNEL` with the absolute path where you cloned ci-channel (e.g., `/home/user/ci-channel`). Project scope means each project gets its own isolated smee channel and webhook.
 
 ## Step 3: Read the auto-provisioned credentials
 
@@ -79,7 +82,7 @@ The channel is now active. CI failure notifications will be pushed into the sess
 Replace step 2 with:
 
 ```bash
-claude mcp add-json --scope user ci '{"command":"npx","args":["tsx","server.ts","--forge","gitlab","--repos","GROUP/PROJECT"],"cwd":"ABSOLUTE_PATH_TO_CI_CHANNEL"}'
+claude mcp add-json --scope project ci '{"command":"npx","args":["tsx","server.ts","--forge","gitlab","--repos","GROUP/PROJECT"],"cwd":"ABSOLUTE_PATH_TO_CI_CHANNEL"}'
 ```
 
 For the webhook (step 4), use the GitLab API or UI:
@@ -94,7 +97,7 @@ Optional: Install `glab` CLI for reconciliation and job enrichment.
 Replace step 2 with:
 
 ```bash
-claude mcp add-json --scope user ci '{"command":"npx","args":["tsx","server.ts","--forge","gitea","--gitea-url","https://YOUR_GITEA_INSTANCE","--repos","OWNER/REPO"],"cwd":"ABSOLUTE_PATH_TO_CI_CHANNEL"}'
+claude mcp add-json --scope project ci '{"command":"npx","args":["tsx","server.ts","--forge","gitea","--gitea-url","https://YOUR_GITEA_INSTANCE","--repos","OWNER/REPO"],"cwd":"ABSOLUTE_PATH_TO_CI_CHANNEL"}'
 ```
 
 Add a Gitea API token to `~/.claude/channels/ci/.env`:

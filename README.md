@@ -46,11 +46,16 @@ cd ci-channel
 npm install
 ```
 
-### 2. Register the MCP server
+### 2. Register the MCP server in your project
+
+From the project you want to monitor (not the ci-channel repo itself):
 
 ```bash
-claude mcp add-json --scope user ci '{"command":"npx","args":["tsx","server.ts"],"cwd":"/absolute/path/to/ci-channel"}'
+cd /path/to/your-project
+claude mcp add-json --scope project ci '{"command":"npx","args":["tsx","server.ts"],"cwd":"/absolute/path/to/ci-channel"}'
 ```
+
+This adds ci-channel to your project's `.mcp.json`. Each project gets its own dedicated smee channel and webhook — no cross-talk between projects.
 
 ### 3. Start Claude Code with the channel enabled
 
@@ -96,9 +101,9 @@ That's it. No `.env` file to create manually, no browser visit to smee.io.
 
 ### GitHub Actions
 
-**Setup:**
+**Setup** (run from your project directory):
 ```bash
-claude mcp add-json --scope user ci '{"command":"npx","args":["tsx","server.ts"],"cwd":"/path/to/ci-channel"}'
+claude mcp add-json --scope project ci '{"command":"npx","args":["tsx","server.ts"],"cwd":"/path/to/ci-channel"}'
 claude --dangerously-load-development-channels server:ci
 ```
 
@@ -140,9 +145,9 @@ WEBHOOK_SECRET=your-webhook-secret
 
 ### GitLab CI
 
-**Setup:**
+**Setup** (run from your project directory):
 ```bash
-claude mcp add-json --scope user ci '{"command":"npx","args":["tsx","server.ts","--forge","gitlab","--repos","group/project"],"cwd":"/path/to/ci-channel"}'
+claude mcp add-json --scope project ci '{"command":"npx","args":["tsx","server.ts","--forge","gitlab","--repos","group/project"],"cwd":"/path/to/ci-channel"}'
 claude --dangerously-load-development-channels server:ci
 ```
 
@@ -167,9 +172,9 @@ WEBHOOK_SECRET=your-gitlab-secret-token
 
 ### Gitea Actions
 
-**Setup:**
+**Setup** (run from your project directory):
 ```bash
-claude mcp add-json --scope user ci '{"command":"npx","args":["tsx","server.ts","--forge","gitea","--gitea-url","https://your-gitea-instance.com","--repos","owner/repo"],"cwd":"/path/to/ci-channel"}'
+claude mcp add-json --scope project ci '{"command":"npx","args":["tsx","server.ts","--forge","gitea","--gitea-url","https://your-gitea-instance.com","--repos","owner/repo"],"cwd":"/path/to/ci-channel"}'
 claude --dangerously-load-development-channels server:ci
 ```
 
@@ -200,9 +205,10 @@ GITEA_TOKEN=your-gitea-api-token
 
 If you use [Codev](https://github.com/cluesmith/codev) for AI-assisted development, you can add ci-channel to your architect session so CI notifications arrive while you work.
 
-**Step 1: Register the MCP server** (one-time):
+**Step 1: Register the MCP server in your Codev project:**
 ```bash
-claude mcp add-json --scope user ci '{"command":"npx","args":["tsx","server.ts"],"cwd":"/absolute/path/to/ci-channel"}'
+cd /path/to/your-codev-project
+claude mcp add-json --scope project ci '{"command":"npx","args":["tsx","server.ts"],"cwd":"/absolute/path/to/ci-channel"}'
 ```
 
 **Step 2: Update `.codev/config.json`** to add the channel flag to the architect command:
@@ -220,9 +226,9 @@ The architect session will now receive CI notifications in real-time. Builders d
 
 **Step 3: Configure the webhook** for your repo (see [Quick Start](#zero-config-quick-start) step 4).
 
-**Filtering**: To limit notifications to specific repos, add `--repos` to the MCP server args:
+**Filtering**: Project scope naturally isolates each project, but if you want to further limit notifications to specific repos, add `--repos` to the MCP server args:
 ```bash
-claude mcp add-json --scope user ci '{"command":"npx","args":["tsx","server.ts","--repos","your-org/your-repo"],"cwd":"/absolute/path/to/ci-channel"}'
+claude mcp add-json --scope project ci '{"command":"npx","args":["tsx","server.ts","--repos","your-org/your-repo"],"cwd":"/absolute/path/to/ci-channel"}'
 ```
 
 ## Configuration Reference
@@ -268,7 +274,7 @@ All CLI args also accept env vars for backward compatibility:
 ### Example: Monitor specific repos and workflows
 
 ```bash
-claude mcp add-json --scope user ci '{"command":"npx","args":["tsx","server.ts","--repos","myorg/api,myorg/frontend","--workflow-filter","CI,Deploy to Production","--reconcile-branches","main,develop"],"cwd":"/path/to/ci-channel"}'
+claude mcp add-json --scope project ci '{"command":"npx","args":["tsx","server.ts","--repos","myorg/api,myorg/frontend","--workflow-filter","CI,Deploy to Production","--reconcile-branches","main,develop"],"cwd":"/path/to/ci-channel"}'
 claude --dangerously-load-development-channels server:ci
 ```
 
@@ -279,7 +285,7 @@ By default, the plugin auto-provisions a smee.io channel on first run and persis
 To use a manually provisioned channel instead (e.g., for shared team use), include `--smee-url` in the args:
 
 ```bash
-claude mcp add-json --scope user ci '{"command":"npx","args":["tsx","server.ts","--smee-url","https://smee.io/your-channel"],"cwd":"/path/to/ci-channel"}'
+claude mcp add-json --scope project ci '{"command":"npx","args":["tsx","server.ts","--smee-url","https://smee.io/your-channel"],"cwd":"/path/to/ci-channel"}'
 ```
 
 ## Features
