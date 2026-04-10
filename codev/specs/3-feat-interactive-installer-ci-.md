@@ -19,11 +19,13 @@ The issue (#3) is detailed and prescriptive. Key decisions extracted from it:
 2. **Q**: Interactive or non-interactive by default? **A**: Interactive by default (prompts before every side-effecting step). A `--yes`/`-y` flag skips prompts for scripting / AI agents.
 3. **Q**: Which forges are supported in v1? **A**: GitHub only. GitLab and Gitea are explicitly deferred to follow-up work — the subcommand should accept `--forge`, but non-GitHub values should fail fast with a "not yet implemented" error.
 4. **Q**: Which prompt library? **A**: `@inquirer/prompts` (the maintained rewrite of Inquirer) — better UX than bare readline, ESM-native, tree-shakeable.
-5. **Q**: Where does the installer write state? **A**: Into the detected project root: `<project-root>/.claude/channels/ci/state.json` and `<project-root>/.claude/channels/ci/.env`. Project detection reuses `findProjectRoot()` (`.mcp.json` or `.git/`).
+5. **Q**: Where does the installer write state? **A**: Into the detected project root: `<project-root>/.claude/channels/ci/state.json`. A `.env` file is **not** written by the installer — the secret lives in `state.json` only, which is exactly what the runtime plugin already reads via `loadConfig` → `ensureSecretReal` → `loadState`. This avoids the two-source-of-truth problem and respects the existing `.env`-is-user-override model.
 6. **Q**: Should the installer modify `.mcp.json`? **A**: Yes, but idempotently — only insert the `ci` server entry if it isn't already present. If present, warn and skip.
 7. **Q**: What happens when re-running on an already-configured project? **A**: The installer is idempotent. It detects existing state.json, reuses the smee URL + secret, and skips webhook creation if a webhook already exists for that smee URL.
 8. **Q**: What about rotation? **A**: Out of scope for v1. Re-running is safe but does not rotate. A `--rotate` flag is mentioned in the issue as future work — not implemented here.
 9. **Q**: Should it authenticate as the user or require `gh` to already be authenticated? **A**: Require `gh` authenticated. The installer shells out to `gh api` and surfaces the error if auth is missing. It does not attempt to run `gh auth login`.
+10. **Q**: What happens on non-TTY stdin (CI / pipes / redirected input)? **A**: `@inquirer/prompts` throws on non-TTY. The installer detects `!process.stdin.isTTY` at startup and: (a) if `--yes` is set, proceed non-interactively; (b) otherwise, fail fast with a message instructing the user to pass `--yes`. No automatic fall-through — an agent calling the installer without `--yes` is almost certainly a bug.
+11. **Q**: Does the old global `~/.claude/channels/ci/` state still matter? **A**: The installer always writes project-local state. If a legacy global state file exists, it is **not** read, migrated, or deleted. Runtime `loadState` already falls back to the global path when no project root is detected, but the `setup` subcommand requires a project root and therefore only operates on project-local state. Existing installs using the global path continue to work as-is (no change to runtime).
 
 ## Problem Statement
 
@@ -63,7 +65,7 @@ This replaces all five manual steps. The new flow:
 
 1. **Detect project root** by walking up from cwd (same logic used by the plugin at runtime).
 2. **Provision credentials upfront** by reusing the existing `bootstrap` logic's building blocks (generate secret, fetch smee.io channel) *without* having to run the MCP server.
-3. **Write state.json and .env** into `<project-root>/.claude/channels/ci/`.
+3. **Write state.json** into `<project-root>/.claude/channels/ci/` (single source of truth for auto-provisioned secret + smee URL; `.env` is untouched so it remains available as a user-managed override).
 4. **Create the GitHub webhook** via `gh api repos/OWNER/REPO/hooks POST` with the freshly provisioned URL + secret.
 5. **Update `.mcp.json`** to register the `ci` server entry if it isn't already registered.
 6. **Print next steps** — tell the user to launch Claude Code with `claude --dangerously-load-development-channels server:ci` (or that it's already wired in the existing session) and that CI notifications will flow.
@@ -87,7 +89,8 @@ The README and INSTALL.md are rewritten to recommend `ci-channel setup --repo ow
 - [ ] Interactive mode prompts before each side-effecting step (smee provisioning, state write, `.env` write, webhook POST, `.mcp.json` edit).
 - [ ] `--yes` flag suppresses all prompts.
 - [ ] `--dry-run` prints each planned action without executing it and does not make any network calls for mutating operations (smee fetch and webhook POST are skipped).
-- [ ] `--forge github` (or default) works; `--forge gitlab` and `--forge gitea` fail fast with a clear "not yet implemented" error.
+- [ ] Non-TTY stdin without `--yes` → fail fast with a clear error message (`stdin is not a TTY; pass --yes to run non-interactively`). Non-TTY stdin with `--yes` → proceed non-interactively.
+- [ ] `--forge github` (or default) works; `--forge gitlab` and `--forge gitea` fail fast with a clear message: "`setup` subcommand only supports GitHub in v1 — the MCP server itself supports all three forges; use the manual install flow in INSTALL.md for GitLab/Gitea".
 - [ ] Idempotency: re-running the installer on an already-configured project does not create a duplicate webhook, does not overwrite a valid state.json, and does not duplicate the `ci` entry in `.mcp.json`.
 - [ ] `gh` not authenticated → installer surfaces the `gh api` error and exits non-zero with a clear message telling the user to run `gh auth login`.
 - [ ] Works from **any subdirectory** of the target project (not just the root) — `findProjectRoot` locates the project root.
@@ -99,14 +102,15 @@ The README and INSTALL.md are rewritten to recommend `ci-channel setup --repo ow
 ## Constraints
 
 ### Technical Constraints
-- Must reuse existing project-detection, state-persistence, and secret-generation code from `lib/` (no copy-paste; share the real implementations).
-- Must preserve the existing default behavior: invoking `ci-channel` with no args (or with server-mode args like `--forge`, `--repos`) still runs the MCP server. Subcommand dispatch must not break `.mcp.json` entries like `{"command":"npx","args":["-y","ci-channel","--forge","gitlab"]}`.
+- Must reuse existing project-detection, state-persistence, and secret-generation code from `lib/` (no copy-paste; share the real implementations). Where an existing helper takes an implicit cwd path (e.g., `ensureSecretReal` internally calls `loadState()` with no args), either (a) happen to align because the installer's cwd *is* the project root context, or (b) pass an explicit project-local state path via the already-supported `saveState(state, path)` / `loadState(path)` overloads. Plan phase must resolve which path each call site takes; the spec requires that the installer always operates on project-local state regardless of how the helpers are wired.
+- Must preserve the existing default behavior: invoking `ci-channel` with no args (or with server-mode args like `--forge`, `--repos`) still runs the MCP server. Subcommand dispatch must not break `.mcp.json` entries like `{"command":"npx","args":["-y","ci-channel","--forge","gitlab"]}`. Dispatch triggers **only** on exact match `process.argv[2] === 'setup'`.
 - Must not require network access in `--dry-run` mode. `--dry-run` must not POST to smee.io, GitHub, or anywhere else.
 - Webhook creation goes through `gh` CLI (spawned subprocess). Do not call the GitHub REST API directly — reusing `gh` inherits the user's auth setup.
-- All subprocess calls must use `stdin: 'ignore'` (MCP stdio isolation pattern; see `codev/resources/lessons-learned.md`). Although `setup` itself doesn't share stdio with an MCP client, keeping the pattern consistent avoids accidents if the subcommand is ever invoked from inside a running MCP server.
+- **Subprocess stdio pattern**: The MCP stdio isolation rule is "subprocesses must not inherit `process.stdin`" so they don't consume bytes from the MCP client's JSON-RPC stream. The mechanism used until now has been `stdin: 'ignore'`. For the installer's `gh api --method POST --input -` call, a JSON payload must be delivered on stdin, so `stdin: 'ignore'` is not viable. Use `stdio: ['pipe', 'pipe', 'pipe']` (a dedicated pipe, explicitly *not* `'inherit'`) and write the payload to the child's stdin. An alternative that preserves `stdin: 'ignore'` is writing the payload to a temp file and passing `--input /path/to/tmp.json`; this is explicitly allowed if the implementer prefers it. Either approach satisfies the isolation invariant (`process.stdin` is never inherited by the child). The `setup` subcommand is also never invoked from inside the running MCP server (it exits via subcommand dispatch before the server starts), so the risk surface is smaller than for server subprocesses — but the invariant is preserved anyway to keep the codebase consistent.
+- **Dynamic import of the installer module**: Approach 1 (subcommand dispatch in `server.ts`) must use `await import('./lib/setup/index.js')` inside the `setup` branch, not a top-level import. This ensures the normal MCP server startup does not pay the load cost of `@inquirer/prompts` or any installer-only code.
 - `@inquirer/prompts` must be added as a runtime dependency. It is ESM-only and small (no heavy transitive deps).
 - No new transitive surface area: avoid bringing in commander, yargs, or oclif. Reuse the existing `process.argv` iteration pattern from `lib/config.ts` (or a minimal ad-hoc parser) for subcommand/flag parsing.
-- TypeScript: subcommand source files live under `lib/setup/` and are compiled as part of the existing `tsc` build. No separate build target.
+- TypeScript: subcommand source files live under `lib/setup/` (a new subdirectory). The rest of `lib/` is flat, but the installer has several tightly-coupled files (arg parsing, prompt runner, `.mcp.json` merger, `gh` wrapper) that benefit from grouping. Nothing outside the installer imports from `lib/setup/`.
 
 ### Business Constraints
 - GitHub-only in v1. Do not block the feature on GitLab/Gitea parity.
@@ -171,16 +175,30 @@ ci-channel setup [options]  # interactive installer (new)
 
 | Flag | Required | Default | Description |
 |------|----------|---------|-------------|
-| `--repo OWNER/REPO` | yes (for GitHub) | — | Target repository in `owner/repo` format. |
-| `--forge FORGE` | no | `github` | Forge to install for. `gitlab` and `gitea` reserved for future work; fail fast if passed. |
+| `--repo OWNER/REPO` | yes (see matrix below) | — | Target repository in `owner/repo` format. |
+| `--forge FORGE` | no | `github` | Forge to install for. `gitlab` and `gitea` are not supported by the installer in v1. |
 | `--yes`, `-y` | no | false | Skip all confirmation prompts. |
 | `--dry-run` | no | false | Print planned actions without executing them. No network calls for mutating ops. |
 | `--smee-url URL` | no | — | Use an explicit smee.io channel instead of auto-provisioning a new one. Useful for persistent channels or re-binding an existing channel. |
 
 Flag validation:
 - Unknown flags → fail fast with a clear error.
-- `--repo` missing → fail fast with a usage error (unless `--dry-run` is set, in which case prompt for it interactively).
-- `--forge` with a value other than `github` → fail fast with "not yet implemented" message.
+- `--forge` with a value other than `github` → fail fast with the v1-scoping message (see Success Criteria).
+
+### Interactive / non-interactive matrix
+
+The installer's behavior for missing `--repo` depends on TTY state and flags. This is the authoritative matrix:
+
+| TTY stdin? | `--yes`? | `--dry-run`? | `--repo` missing → behavior |
+|-----------|----------|--------------|-----------------------------|
+| Yes | No | Yes or No | Prompt interactively for the repo. |
+| Yes | Yes | Yes or No | Fail fast: `--yes requires --repo`. |
+| No | No | Yes or No | Fail fast: `stdin is not a TTY; pass --yes to run non-interactively`. |
+| No | Yes | Yes or No | Fail fast: `--yes requires --repo` (non-TTY cannot prompt). |
+
+Rationale: `--yes` means "no prompts allowed". If `--repo` is missing in that mode, there's no valid way to obtain it, so the only safe behavior is to fail fast. `--dry-run` does not relax this — a dry run with no target repo still has nothing to show. Interactive TTY mode without `--yes` is the only case where the installer prompts for the repo.
+
+When `--repo` is present, the other flags behave independently: `--yes` skips confirmation prompts, `--dry-run` skips all mutating ops regardless of prompts.
 
 ## Installer Step Sequence
 
@@ -190,8 +208,8 @@ Each step is preceded by an interactive confirmation (unless `--yes`). In `--dry
 2. **Check existing state**: Load `<project-root>/.claude/channels/ci/state.json`. If present and contains `webhookSecret` + `smeeUrl`, remember "state exists — will reuse".
 3. **Provision smee channel** (skip if state already has a valid smeeUrl, or if `--smee-url` was passed). Reuses `fetchSmeeChannel()` from `lib/bootstrap.ts`.
 4. **Generate webhook secret** (skip if state already has one). Reuses `ensureSecretReal()` from `lib/bootstrap.ts` with `existing = null`.
-5. **Write state.json and .env** into `<project-root>/.claude/channels/ci/`. state.json contains `{ webhookSecret, smeeUrl }`; `.env` contains `WEBHOOK_SECRET=...` (and forge-specific secrets if applicable). Uses `saveState` from `lib/state.ts`.
-6. **List existing webhooks** via `gh api repos/OWNER/REPO/hooks` and check whether any webhook's `config.url` already matches the smee URL. If found, print "Webhook already exists for smee URL $URL — skipping". Otherwise proceed.
+5. **Write state.json** into `<project-root>/.claude/channels/ci/`. Contains `{ webhookSecret, smeeUrl }`. Uses `saveState(state, path)` from `lib/state.ts` with an explicit project-local path. **Does not write `.env`** — the `.env` file is reserved for user-supplied overrides, and writing auto-provisioned secrets into it would create a two-source-of-truth problem (runtime `loadConfig` reads `.env` first, then falls back to `state.json`). Keeping auto-provisioned secrets in `state.json` only is consistent with how the running plugin already does first-run bootstrap (`lib/bootstrap.ts`).
+6. **List existing webhooks** via `gh api --paginate repos/OWNER/REPO/hooks` and check whether any webhook's `config.url` already matches the smee URL. The `--paginate` flag is **required** — default pagination returns only 30 hooks, which would cause false negatives on repos with many hooks. If a match is found, print "Webhook already exists for smee URL $URL — skipping". Otherwise proceed.
 7. **Create webhook** via `gh api repos/OWNER/REPO/hooks --method POST --input -` with payload:
    ```json
    {
@@ -200,22 +218,42 @@ Each step is preceded by an interactive confirmation (unless `--yes`). In `--dry
      "active": true
    }
    ```
-8. **Update `.mcp.json`**: Read `<project-root>/.mcp.json`. If it doesn't exist, create it with `{ "mcpServers": { "ci": { "command": "npx", "args": ["-y", "ci-channel"] } } }`. If it exists but has no `mcpServers.ci`, merge the `ci` entry in. If `mcpServers.ci` already exists, print "ci server already registered in .mcp.json — skipping" and do not modify it.
+8. **Update `.mcp.json`**: Read `<project-root>/.mcp.json`. The handling matrix is:
+
+   | Current `.mcp.json` state | Behavior |
+   |---------------------------|----------|
+   | File does not exist | Create with `{ "mcpServers": { "ci": { "command": "npx", "args": ["-y", "ci-channel"] } } }` |
+   | File exists, valid JSON, has `mcpServers.ci` | Print "ci server already registered — skipping". Do not modify. |
+   | File exists, valid JSON, has `mcpServers` object without `ci` | Merge `ci` into `mcpServers`, preserving all other keys. |
+   | File exists, valid JSON, has **no** `mcpServers` key | Add `mcpServers` with just the `ci` entry, preserving all other top-level keys. |
+   | File exists, valid JSON, `mcpServers` is not an object (e.g., array, null, string) | **Fail fast** with an error: `.mcp.json has invalid mcpServers (expected object). Fix the file and re-run setup.` Do not modify. |
+   | File exists, valid JSON, top-level is not an object (e.g., array) | **Fail fast** with a similar error. |
+   | File exists, invalid JSON (parse error) | **Fail fast** with `.mcp.json is not valid JSON: <error message>. Fix the file and re-run setup.` Do not modify. |
+
+   In all fail-fast cases, the installer exits non-zero *before* doing any other write in this step. Steps 1–7 may already have completed (state.json written, webhook created); that is acceptable — a failed `.mcp.json` step leaves a reportable, fixable error.
+
+   When writing, preserve the existing indentation style (detect from the first indented line, default to 2 spaces). Use a round-trip-safe merge: parse → merge → `JSON.stringify(obj, null, indent)` → write.
+
 9. **Print next steps**: Tell the user the install is complete and to launch (or relaunch) Claude Code with `claude --dangerously-load-development-channels server:ci`. If `.mcp.json` was newly created or modified, remind them about the "project-scoped servers need explicit approval" gotcha from INSTALL.md.
 
 ## Idempotency Rules
 
+The installer has two overlapping concepts: **reuse** (re-run on existing state, leave it alone) and **override** (CLI flag explicitly supplies a different value). The rules:
+
 | Condition | Behavior |
 |-----------|----------|
-| `state.json` exists with valid `webhookSecret` + `smeeUrl` | Reuse; skip steps 3–5. |
-| `state.json` missing or incomplete | Run steps 3–5. |
-| Webhook already exists for our smee URL | Skip step 7. |
+| `state.json` exists with valid `webhookSecret` + `smeeUrl`, no overriding CLI flags | **Reuse**; skip steps 3–5. |
+| `state.json` missing or incomplete, no overriding CLI flags | Run steps 3–5 to auto-provision. |
+| `--smee-url URL` passed, state.json has no smeeUrl | Use the CLI-provided URL, write it into state.json. No override — the stored value was absent. |
+| `--smee-url URL` passed, state.json has a **matching** smeeUrl | No-op for smeeUrl; continue with webhook idempotency on the matching URL. |
+| `--smee-url URL` passed, state.json has a **different** smeeUrl | **Explicit override**: honor the CLI value, update state.json to the new URL, and proceed with webhook creation for the new URL. This *will* create a new webhook (the existing webhook for the old URL is left in place — not deleted). The webhook secret is **not** regenerated; the installer reuses the existing `webhookSecret` from state.json for the new webhook. Emit a warning: `Overriding smeeUrl in state.json (old: ..., new: ...). Existing webhook for the old URL is left in place; delete it manually if no longer needed.` |
+| Webhook already exists for our smee URL (via `gh api --paginate`) | Skip step 7. |
 | Webhook exists for a *different* smee URL | Ignore it; proceed with step 7 (user may have multiple relays). Do not delete any existing webhook. |
 | `.mcp.json` exists with `mcpServers.ci` entry | Skip step 8. Warn the user the entry is already present (show the current value). |
 | `.mcp.json` exists without `mcpServers.ci` | Merge a new entry in, preserving all other servers. |
 | `.mcp.json` does not exist | Create it with just the `ci` entry. |
 
-No destructive operations. The installer never deletes, overwrites, or rotates any credentials or configuration.
+**No destructive operations.** The installer never deletes, overwrites, or rotates any secret automatically. The one user-driven exception is `--smee-url` override, which replaces the stored `smeeUrl` but reuses the existing `webhookSecret`. Rotation (`--rotate`) is out of scope for v1 — users who want to rotate must manually delete state.json and the old webhook, then re-run `setup`.
 
 ## Open Questions
 
@@ -240,32 +278,45 @@ Not performance-sensitive. The installer runs once per project. Target: entire i
 ## Security Considerations
 
 - **Webhook secret** is generated via `crypto.randomBytes(32)` (256 bits of entropy) — same mechanism as the existing bootstrap.
-- **`.env` file permissions**: written with default permissions. The directory `.claude/channels/ci/` should be in `.gitignore` already at the project level; the installer does not modify `.gitignore`. (If the user doesn't have it gitignored, that's a pre-existing concern not introduced by this feature.)
+- **state.json file permissions**: written with `chmod 600` (owner read/write only) because it contains the webhook secret. The directory `.claude/channels/ci/` should be in `.gitignore` already at the project level; the installer does not modify `.gitignore`. (If the user doesn't have it gitignored, that's a pre-existing concern not introduced by this feature — but the installer prints a warning if `.claude/channels/ci/` is not in any ancestor `.gitignore`.)
+- **`.env` is not written** by the installer. The `.env` file remains a user-managed override mechanism — no installer-generated secrets live there.
 - **`gh` auth**: the installer relies on the user's already-authenticated `gh` token. It does not store, transmit, or log the token.
 - **Webhook URL**: the smee.io URL is the primary secret-protection mechanism — the secret is also sent in the webhook config, and the plugin validates signatures on every incoming webhook.
-- **No token logging**: the installer never prints the webhook secret to stdout in plain form (only to the `.env` file and to the `gh api` stdin payload). Dry-run mode is explicit: it prints `[redacted]` in place of the secret.
-- **Input validation**: `--repo` must match `/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/`. Reject any other value before passing to `gh`.
+- **No token logging**: the installer never prints the webhook secret to stdout in plain form (only to state.json and to the `gh api` stdin pipe / temp-file payload). Dry-run mode is explicit: it prints `[redacted]` in place of the secret.
+- **`gh` payload delivery**: if the temp-file approach is used instead of stdin piping, the temp file must (a) be created with `mode 0600`, (b) live inside `os.tmpdir()`, (c) be deleted in a `finally` block regardless of `gh` success/failure.
+- **Input validation**: `--repo` must match `/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/`. Reject any other value before passing to `gh`. Same regex applies to interactively-prompted input.
 
 ## Test Scenarios
 
 ### Functional Tests
 
-1. **Happy path (mocked)**: `setup --repo owner/repo --yes` on a fresh project → state.json, `.env`, and `.mcp.json` created; `gh api hooks POST` invoked once with correct payload.
+1. **Happy path (mocked)**: `setup --repo owner/repo --yes` on a fresh project → state.json (with `webhookSecret` + `smeeUrl`, `chmod 600`) and `.mcp.json` created; `gh api hooks POST` invoked once with correct payload. No `.env` is written.
 2. **Idempotent re-run (mocked)**: Run setup twice. Second run detects existing state, detects existing webhook, detects existing `.mcp.json` entry, and exits cleanly without mutating anything.
 3. **Existing `.mcp.json` with other servers**: `.mcp.json` already has `mcpServers.other-server` → setup merges in `ci` without disturbing `other-server`.
 4. **Existing `.mcp.json` with ci entry**: `.mcp.json` already has `mcpServers.ci` → setup warns and leaves `.mcp.json` unchanged.
 5. **Dry-run**: `setup --repo owner/repo --dry-run --yes` → no files written, no network calls for smee or `gh api POST`, prints all planned actions.
-6. **Missing `--repo`**: `setup --yes` → fail fast with a usage error.
-7. **Non-GitHub forge**: `setup --repo owner/repo --forge gitlab` → fail fast with "not yet implemented".
-8. **No project root**: Run from `/tmp` → fail fast with "could not locate project root".
-9. **Running from a subdirectory**: Run setup from `<project>/src/foo/` → detects project root correctly.
-10. **Webhook already exists for our smee URL**: Mock `gh api /hooks` to return a hook whose `config.url` matches the smee URL → setup skips webhook creation.
-11. **Webhook POST failure**: Mock `gh api POST` to fail → setup exits non-zero with the `gh` stderr surfaced.
-12. **Existing state.json with `--smee-url`**: User passes explicit `--smee-url` that differs from stored state → setup honors the CLI arg and updates state.json.
-13. **Invalid `--repo` format**: `setup --repo 'bad"value'` → rejected before invoking `gh`.
-14. **Interactive confirmation flow (integration)**: Programmatic test injecting `y` answers to each prompt; verifies the sequence of prompts.
-15. **Interactive decline**: User declines a prompt (e.g., "Create webhook? n") → setup exits cleanly without running that step or subsequent steps, prints partial-install guidance.
-16. **Existing tests**: All 170 pre-existing tests continue to pass with no modification.
+6. **Missing `--repo` + `--yes`**: `setup --yes` → fail fast with `--yes requires --repo`.
+7. **Missing `--repo` + non-TTY**: simulate `!process.stdin.isTTY` + no `--yes` → fail fast with TTY error.
+8. **Missing `--repo` + TTY + no `--yes`**: interactive test → prompts for the repo value.
+9. **Non-GitHub forge**: `setup --repo owner/repo --forge gitlab` → fail fast with the v1-scoping message (explicitly contains "MCP server itself supports all three forges").
+10. **No project root**: Run from `/tmp` → fail fast with "could not locate project root".
+11. **Running from a subdirectory**: Run setup from `<project>/src/foo/` → detects project root correctly.
+12. **Webhook already exists for our smee URL**: Mock `gh api --paginate /hooks` to return a hook whose `config.url` matches the smee URL → setup skips webhook creation.
+13. **Webhook pagination**: Mock `gh api --paginate` to return many pages where the matching hook is on a later page → idempotency check still finds it.
+14. **Webhook POST failure**: Mock `gh api POST` to fail → setup exits non-zero with the `gh` stderr surfaced.
+15. **`--smee-url` override diverges from state**: State has URL A; user passes `--smee-url B` → setup updates state.json to B, reuses existing webhookSecret, creates a new webhook for B, prints the "old webhook left in place" warning.
+16. **`--smee-url` matches state**: State has URL A; user passes `--smee-url A` → no-op for state.json; webhook idempotency check runs as normal.
+17. **Invalid `--repo` format**: `setup --repo 'bad"value'` → rejected before invoking `gh`.
+18. **Interactive confirmation flow (integration)**: Programmatic test injecting `y` answers to each prompt; verifies the sequence of prompts.
+19. **Interactive decline**: User declines a prompt (e.g., "Create webhook? n") → setup exits cleanly without running that step or subsequent steps, prints partial-install guidance.
+20. **`.mcp.json` malformed JSON**: Pre-existing `.mcp.json` is invalid JSON → fail fast with a parse-error message. State.json and webhook (already created in steps 1–7) are left as-is.
+21. **`.mcp.json` has top-level array**: `[]` at top level → fail fast with a "not an object" error.
+22. **`.mcp.json` has `mcpServers` as a string/null/array**: Fail fast.
+23. **`.mcp.json` with other servers preserved**: `.mcp.json` already has `mcpServers.other` → setup merges in `ci` without disturbing `other`.
+24. **`state.json` malformed**: Pre-existing `state.json` is invalid JSON → `loadState` returns `{}` (existing behavior); installer treats it as missing and runs steps 3–5 as if fresh.
+25. **Missing `gh` binary**: `gh` not found on PATH → fail fast with `gh CLI not found. Install from https://cli.github.com/ and run 'gh auth login'.`
+26. **Legacy global state ignored**: `~/.claude/channels/ci/state.json` exists with different values → setup does NOT read or migrate it; always uses the project-local path. Emit a one-line informational note (`Note: legacy global state at ~/.claude/channels/ci/state.json is not used by setup — install is project-scoped.`) only if the global state actually exists.
+27. **Existing tests**: All 170 pre-existing tests continue to pass with no modification.
 
 ### Non-Functional Tests
 1. **No subprocess leaks**: Ensure any `gh` subprocesses are properly awaited and their stdio closed (reuse the `stdin: 'ignore'` pattern).
@@ -317,3 +368,30 @@ Not performance-sensitive. The installer runs once per project. Target: entire i
 - This feature is a pure addition on top of the existing plugin — it doesn't change how the MCP server runs, what events it accepts, or the notification format. It only changes the *install UX*.
 - Once `setup` exists, the `setup` flow itself becomes the thing that should be tested end-to-end on cluesmith/ci-channel (follow-up work — can re-use the E2E validation requirement from Spec 1).
 - The `--rotate` flag is explicitly deferred. If a user needs to rotate the webhook secret today, they can delete the webhook, delete state.json, and re-run `setup`. That's acceptable manual effort for v1.
+
+## Expert Consultation
+
+**Date**: 2026-04-10
+**Models Consulted**: Codex (GPT-5), Gemini Pro, Claude (Opus)
+
+**Codex verdict**: REQUEST_CHANGES (HIGH confidence)
+**Gemini verdict**: APPROVE (HIGH confidence)
+**Claude verdict**: COMMENT (HIGH confidence)
+
+**Key feedback addressed (iteration 1)**:
+
+- **`.env` ownership conflict** (Codex, Claude): Removed `.env` writes entirely. Installer now writes only `state.json`; `.env` remains a user-managed override. Runtime `loadConfig` already reads state.json as a fallback, so this is consistent with the existing model. Added clarifying question #5 and security note.
+- **Non-interactive flag semantics** (Codex): Added the Interactive / non-interactive matrix specifying exact behavior for every combination of TTY, `--yes`, `--dry-run`, and missing `--repo`.
+- **Idempotency vs `--smee-url` override** (Codex, Claude): Added explicit override rules. `--smee-url` that differs from stored state is the one user-driven exception to "no overwrites", and its full semantics (secret reuse, new webhook creation, old webhook preserved) are spelled out.
+- **`.mcp.json` malformed handling** (Codex): Added explicit fail-fast matrix for all `.mcp.json` shapes (missing, valid-with-ci, valid-without-mcpServers, non-object mcpServers, non-object top-level, invalid JSON).
+- **Legacy global state** (Codex): Added clarifying question #11 — installer never reads, migrates, or touches global state. Added test scenario 26.
+- **`stdin: 'ignore'` contradicts `--input -`** (Gemini, Claude): Replaced hard rule with a nuanced constraint explaining the invariant (don't inherit `process.stdin`), allowing either a dedicated pipe or temp-file approach.
+- **Dynamic import of setup module** (Gemini): Added constraint requiring `await import('./lib/setup/index.js')` to avoid loading installer-only deps during MCP server startup.
+- **TTY handling** (Claude): Added clarifying question #10 plus success criterion and the full interactive matrix.
+- **Forge messaging** (Claude): Corrected "not yet implemented" wording to reflect that the MCP server supports all three forges — only the installer is GitHub-only in v1.
+- **Webhook pagination** (Claude): Step 6 and constraints now require `gh api --paginate`, and test scenario 13 explicitly covers multi-page results.
+- **`ensureSecretReal` path parameter** (Claude): Added to technical constraints — plan phase must resolve how the installer passes an explicit project-local state path (either cwd-alignment or helper overload). `saveState`/`loadState` already accept explicit paths.
+- **`lib/setup/` vs flat layout** (Claude): Added one-line justification in technical constraints.
+- **state.json `chmod 600`** (Claude): Explicit file-mode requirement added to security section.
+- **Missing `gh` binary test** (Codex): Added test scenario 25.
+- **`state.json` malformed test** (Codex): Added test scenario 24.
