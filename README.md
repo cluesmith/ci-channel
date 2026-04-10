@@ -366,7 +366,7 @@ Most users should install via `npx ci-channel` (see [Quick Start](#installation)
 git clone https://github.com/cluesmith/ci-channel.git
 cd ci-channel
 npm install
-npm test             # Run all tests (291 tests across 19 files)
+npm test             # Run all tests (303 tests across 20 files)
 npm run build        # Build to dist/
 npx tsx server.ts    # Run from source
 ```

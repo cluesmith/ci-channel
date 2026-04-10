@@ -86,7 +86,7 @@ The README and INSTALL.md are rewritten to recommend `ci-channel setup --repo ow
 
 - [ ] `npx ci-channel setup --repo owner/repo` runs end-to-end on a fresh project and produces a working ci-channel install (webhook registered, state.json written, `.mcp.json` updated).
 - [ ] `ci-channel setup` without any subcommand args runs the MCP server (existing behavior preserved).
-- [ ] Interactive mode prompts before each side-effecting step (smee provisioning, state write, `.env` write, webhook POST, `.mcp.json` edit).
+- [ ] Interactive mode prompts before each side-effecting step (smee provisioning, state write, webhook create/update, `.mcp.json` edit).
 - [ ] `--yes` flag suppresses all prompts.
 - [ ] `--dry-run` prints each planned action without executing it and does not make any network calls for mutating operations (smee fetch and webhook POST are skipped).
 - [ ] Non-TTY stdin without `--yes` → fail fast with a clear error message (`stdin is not a TTY; pass --yes to run non-interactively`). Non-TTY stdin with `--yes` → proceed non-interactively.
@@ -104,7 +104,7 @@ The README and INSTALL.md are rewritten to recommend `ci-channel setup --repo ow
 ### Technical Constraints
 - Must reuse existing project-detection, state-persistence, and secret-generation code from `lib/` (no copy-paste; share the real implementations). Where an existing helper takes an implicit cwd path (e.g., `ensureSecretReal` internally calls `loadState()` with no args), either (a) happen to align because the installer's cwd *is* the project root context, or (b) pass an explicit project-local state path via the already-supported `saveState(state, path)` / `loadState(path)` overloads. Plan phase must resolve which path each call site takes; the spec requires that the installer always operates on project-local state regardless of how the helpers are wired.
 - Must preserve the existing default behavior: invoking `ci-channel` with no args (or with server-mode args like `--forge`, `--repos`) still runs the MCP server. Subcommand dispatch must not break `.mcp.json` entries like `{"command":"npx","args":["-y","ci-channel","--forge","gitlab"]}`. Dispatch triggers **only** on exact match `process.argv[2] === 'setup'`.
-- Must not require network access in `--dry-run` mode. `--dry-run` must not POST to smee.io, GitHub, or anywhere else.
+- `--dry-run` must not perform any **mutating** network operations: no POST to smee.io, no webhook POST/PATCH to GitHub, no file writes. Read-only network calls (e.g., `gh api GET repos/{repo}/hooks` to preview idempotency behavior) are allowed because they give the user a more accurate preview of what the non-dry-run would do. The trade-off is that dry-run requires `gh` to be authenticated, which is the same prerequisite as the non-dry-run install. If dry-run is supposed to be a "would anything break?" check, calling the read API is exactly what the user wants.
 - Webhook creation goes through `gh` CLI (spawned subprocess). Do not call the GitHub REST API directly — reusing `gh` inherits the user's auth setup.
 - **Subprocess stdio pattern**: The MCP stdio isolation rule is "subprocesses must not inherit `process.stdin`" so they don't consume bytes from the MCP client's JSON-RPC stream. The mechanism used until now has been `stdin: 'ignore'`. For the installer's `gh api --method POST --input -` call, a JSON payload must be delivered on stdin, so `stdin: 'ignore'` is not viable. Use `stdio: ['pipe', 'pipe', 'pipe']` (a dedicated pipe, explicitly *not* `'inherit'`) and write the payload to the child's stdin. An alternative that preserves `stdin: 'ignore'` is writing the payload to a temp file and passing `--input /path/to/tmp.json`; this is explicitly allowed if the implementer prefers it. Either approach satisfies the isolation invariant (`process.stdin` is never inherited by the child). The `setup` subcommand is also never invoked from inside the running MCP server (it exits via subcommand dispatch before the server starts), so the risk surface is smaller than for server subprocesses — but the invariant is preserved anyway to keep the codebase consistent.
 - **Dynamic import of the installer module**: Approach 1 (subcommand dispatch in `server.ts`) must use `await import('./lib/setup/index.js')` inside the `setup` branch, not a top-level import. This ensures the normal MCP server startup does not pay the load cost of `@inquirer/prompts` or any installer-only code.
@@ -123,7 +123,7 @@ The README and INSTALL.md are rewritten to recommend `ci-channel setup --repo ow
 - Users have `admin:repo_hook` scope on their `gh` token (required by GitHub to create webhooks). If missing, `gh api hooks POST` returns 404/403; the installer surfaces that error verbatim with a hint about the required scope.
 - `smee.io` is reachable from the user's network. This is already a hard requirement of the runtime plugin; reusing it here doesn't add new risk. If smee.io is down or blocked, `--dry-run` still works (doesn't hit the network) and non-dry-run fails fast with a clear error.
 - The target repo exists and the user has admin access to it (required to create webhooks). Failures here are reported verbatim via `gh` error text.
-- Node.js v20+ (same engine constraint as the rest of the package).
+- Node.js v20.17.0+ (bumped from `>=20` in Spec 3 to match the `@inquirer/prompts` transitive dep floor from `mute-stream`).
 - The project to install into is either a Claude Code project (has `.mcp.json`) or a git repo (has `.git/`). Projects that are neither are out of scope — the installer refuses with a clear error.
 
 ## Solution Approaches
@@ -295,7 +295,7 @@ Not performance-sensitive. The installer runs once per project. Target: entire i
 2. **Idempotent re-run (mocked)**: Run setup twice. Second run detects existing state, detects existing webhook, detects existing `.mcp.json` entry, and exits cleanly without mutating anything.
 3. **Existing `.mcp.json` with other servers**: `.mcp.json` already has `mcpServers.other-server` → setup merges in `ci` without disturbing `other-server`.
 4. **Existing `.mcp.json` with ci entry**: `.mcp.json` already has `mcpServers.ci` → setup warns and leaves `.mcp.json` unchanged.
-5. **Dry-run**: `setup --repo owner/repo --dry-run --yes` → no files written, no network calls for smee or `gh api POST`, prints all planned actions.
+5. **Dry-run**: `setup --repo owner/repo --dry-run --yes` → no files written, no smee.io provisioning, no `gh api POST`/`PATCH`. Read-only `gh api --paginate --slurp repos/{repo}/hooks` IS called (it's not mutating, and the result makes the preview accurate). Prints all planned actions.
 6. **Missing `--repo` + `--yes`**: `setup --yes` → fail fast with `--yes requires --repo`.
 7. **Missing `--repo` + non-TTY**: simulate `!process.stdin.isTTY` + no `--yes` → fail fast with TTY error.
 8. **Missing `--repo` + TTY + no `--yes`**: interactive test → prompts for the repo value.

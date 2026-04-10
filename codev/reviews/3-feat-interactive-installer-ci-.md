@@ -9,7 +9,7 @@
 
 Added a `ci-channel setup` subcommand that replaces the previous five-step manual install flow with a single command. The installer detects the project root, provisions a smee.io channel, generates a webhook secret, creates the GitHub webhook via `gh api`, and registers the `ci` MCP server in `.mcp.json` — all idempotently, with `--yes` / `--dry-run` flags and optional interactive prompts backed by `@inquirer/prompts`. GitHub-only in v1; GitLab/Gitea users fall back to the manual flow in INSTALL.md (now retained as the secondary install path).
 
-The feature is a pure addition: no existing `lib/` file was modified (other than a ~10-line subcommand dispatch insertion at the top of `server.ts`). All 170 pre-existing tests still pass; 121 new tests were added across 8 new test files, bringing the suite to **291 tests / 19 files**.
+The feature is a pure addition: no existing `lib/` file was modified beyond a ~10-line subcommand dispatch at the top of `server.ts` and a small `lib/config.ts` fix (remove global `.env` fallback when a project root is detected) added during PR review. All 170 pre-existing tests still pass; 133 new tests were added across 9 new test files, bringing the suite to **303 tests / 20 files**.
 
 ## Spec Compliance
 
@@ -203,13 +203,13 @@ None of substance. Two minor adjustments:
 
 #### Claude — COMMENT
 - **Broken anchors**: Same as Codex. **Addressed**.
-- **Stale test count (173 tests, 12 files)**: **Addressed** — updated to `291 tests across 19 files`.
+- **Stale test count (173 tests, 12 files)**: **Addressed** — updated to `303 tests across 20 files` (bumped again after PR-phase fixes added more tests).
 - **`stdin: 'ignore'` rule**: Same as Codex. **Addressed**.
 - **Optional: README install section could note `setup` doesn't write `.env`**: **Addressed** via the per-forge section rewrites (which now explicitly say "The installer does **not** write `.env`").
 
 ## Flaky Tests
 
-No flaky tests encountered during this project. All 291 tests pass deterministically on every run locally. The pre-existing `stdio-lifecycle.test.ts` test (which spawns a real server subprocess and exercises the full webhook pipeline) continues to pass.
+No flaky tests encountered during this project. All 303 tests pass deterministically on every run locally. The pre-existing `stdio-lifecycle.test.ts` test (which spawns a real server subprocess and exercises the full webhook pipeline) continues to pass.
 
 ## Follow-up Items
 
