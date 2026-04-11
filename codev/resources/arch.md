@@ -153,12 +153,14 @@ runSetup(argv)
         ├── legacyGlobalStateExists() → informational note (if true)
         ├── readState() → existingState
         ├── resolveSecret:   generate 256-bit or reuse existing
-        │                    (tracks secretWasGenerated flag)
         ├── resolveSmeeUrl:  --smee-url override | reuse | fetchSmeeChannel
         ├── isGitignored check → io.warn if not ignored
         ├── ghListHooks(repo) → scan for matching smee URL
         ├── warn if multiple hooks point at the same URL
-        ├── ── webhook reconciliation FIRST (before state write) ──
+        ├── ── writeState FIRST (state-first ordering, iter6) ──
+        │   writeState(projectRoot, state)  [skipped if unchanged; mode 0o600]
+        │   (only reached if the webhook step succeeded)
+        ├── ── webhook reconciliation (AFTER state is persisted) ──
         │   if matching hook
         │     → ghUpdateHook(repo, id, canonical_payload)
         │       [PATCH — always reconcile, no skip path. Sets the
@@ -168,17 +170,18 @@ runSetup(argv)
         │   else
         │     → ghCreateHook(repo, canonical_payload)
         │       [POSTs via piped stdin]
-        │   (any failure or user decline throws HERE — state.json untouched)
-        ├── writeState(projectRoot, state)  [skipped if unchanged; mode 0o600]
-        │   (only reached if the webhook step succeeded)
+        │   (any failure or user decline throws HERE — state.json
+        │    already persisted, so the next run will reuse it)
         ├── readMcpJson + mergeCiServer → {updated, action}
         ├── writeMcpJson  [skipped if action === 'skipped_exists']
         └── printNextSteps(action)  [conditional approval reminder]
 ```
 
-**Critical ordering invariant**: the webhook reconciliation runs **before** the state.json write. If state were written first, a subsequent failure or user decline of the webhook PATCH would leave state.json inconsistent with the remote state. By reconciling the webhook first, a failure/decline throws before state is touched, and the next run correctly re-runs the reconciliation.
+**Critical ordering invariant (iter6 — final)**: state.json is written **BEFORE** the webhook reconciliation. This ordering is safe in iter5+ because the skip path was removed — any remote/local drift converges on the next run via the always-PATCH branch. State-first closes a CREATE-path orphan failure mode: if `ghCreateHook` succeeded and then `writeState` failed (disk full, SIGKILL, permissions), the next run would read empty state, fetch a DIFFERENT smee URL, and create a SECOND webhook — the first becomes an orphan signing with a lost secret. With state-first, the next run reuses the stored `{secret, smeeUrl}` pair to either find the same orphan (PATCH-recover) or re-create the webhook with identical credentials (no orphan).
 
 **No skip path (iter5 structural fix)**: After four iterations of finding silent-failure modes in the skip path (iter1: secret-not-rotated when state deleted; iter2: state-persisted-before-webhook race; iter3: single-field URL-mismatch skip; iter4: active=false / wrong events / wrong content_type skip), the skip path was removed entirely. The installer now always PATCHes an existing hook with the canonical ci-channel payload. The cost is one extra API call per re-run; the benefit is that skip-path edge cases are eliminated by construction. See the extensive `Webhook field audit` block comment in `lib/setup/orchestrator.ts` for the per-field rationale.
+
+**Why the ordering changed from iter3/iter4 to iter6**: iter3 established "webhook-first, state-second" to protect the skip path — writing state first would cause the next run's skip check to see a stored pair and incorrectly bypass the needed rotation. Iter5 removed the skip path, which dissolved that constraint. Iter6 re-examined the ordering and found the opposite bug in the CREATE path: webhook-first with a failed state-write leaves an orphan. State-first is convergent for both PATCH and CREATE paths now that there's no skip fast-path.
 
 ### Configuration (`lib/config.ts`)
 

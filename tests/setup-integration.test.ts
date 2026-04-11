@@ -274,18 +274,17 @@ describe('setup integration (real fs)', () => {
     assert.deepEqual(mcp.mcpServers.ci, { ...CI_SERVER_ENTRY })
   })
 
-  test('architect regression (iter2): decline at PATCH prompt → state.json not written on disk', async () => {
-    // End-to-end version of the orchestrator-level regression in
-    // setup-orchestrator.test.ts. Uses real filesystem + real
-    // writeStateForSetup. Pre-populates state.json with only smeeUrl
-    // (simulating the partial-state scenario), creates a matching
-    // hook, runs interactively with a declining Io, and asserts
-    // state.json still has no webhookSecret on disk after the run.
+  test('iter6: decline at PATCH after state-first write → state.json on disk has the new secret; second run converges via always-PATCH', async () => {
+    // Iter6 state-first ordering means state IS persisted before the
+    // PATCH prompt. The iter2 "empty state on decline" invariant no
+    // longer holds; instead, the invariant is "the next run converges
+    // via always-PATCH because iter5 removed the skip path."
     //
-    // The failure mode this locks out: state being written with a
-    // fresh secret BEFORE the PATCH confirmation, then the user
-    // declining — causing the next run to skip the PATCH as
-    // idempotent and silently break HMAC validation.
+    // This test locks both:
+    //   1. First run (decline PATCH): state.json on disk has the
+    //      newly generated secret
+    //   2. Second run (accept PATCH): reads the stored state, PATCHes
+    //      the existing hook, ends in a consistent state
     const statePath = stateFilePath(tmpRoot)
     const stateDir = dirname(statePath)
     mkdirSync(stateDir, { recursive: true })
@@ -311,8 +310,7 @@ describe('setup integration (real fs)', () => {
       info: () => {},
       warn: () => {},
       confirm: async (message: string) => {
-        // iter5: the prompt is "Reconcile existing webhook ...?"
-        // (was "Update existing webhook..." in iter4). Decline it.
+        // Accept the state-write prompt; decline the reconcile prompt.
         if (message.includes('Reconcile existing webhook')) return false
         return true
       },
@@ -324,28 +322,51 @@ describe('setup integration (real fs)', () => {
     await assert.rejects(
       () =>
         runInstall(
-          baseArgs({ yes: false }), // interactive so confirm is actually called
+          baseArgs({ yes: false }), // interactive
           deps,
           decliningIo,
         ),
       (err: Error) => err.name === 'UserDeclinedError',
     )
 
-    // PATCH was NOT called.
+    // PATCH was NOT called (user declined).
     assert.equal(mock.ghUpdateHookCalls, 0)
 
-    // state.json on disk still has ONLY smeeUrl — no webhookSecret.
-    // This is the critical assertion: if the installer had written
-    // state before the PATCH prompt (the iter2 bug), this file would
-    // now have a fresh secret, and the next run would silently skip
-    // the PATCH path.
-    const stateContent = JSON.parse(readFileSync(statePath, 'utf-8'))
-    assert.equal(
-      stateContent.webhookSecret,
-      undefined,
-      'state.json must not contain a webhookSecret after the user declines the PATCH prompt',
-    )
-    assert.equal(stateContent.smeeUrl, 'https://smee.io/partial')
+    // state.json on disk NOW has the freshly generated secret AND
+    // the existing smeeUrl. This is the iter6 ordering — state is
+    // persisted before the webhook step.
+    const stateAfterFirstRun = JSON.parse(readFileSync(statePath, 'utf-8'))
+    assert.equal(stateAfterFirstRun.smeeUrl, 'https://smee.io/partial')
+    assert.equal(stateAfterFirstRun.webhookSecret, 'a'.repeat(64)) // the mock's generateSecret value
+
+    // --- Second run: user accepts the PATCH prompt ---
+    //
+    // The stored state should lead the second run through the always-
+    // PATCH branch (iter5). ghListHooks still returns the matching
+    // hook, so no CREATE happens and the existing state is reused.
+    const acceptingIo = {
+      info: () => {},
+      warn: () => {},
+      confirm: async () => true,
+      prompt: async () => {
+        throw new Error('prompt should not be called')
+      },
+    }
+
+    await runInstall(baseArgs({ yes: false }), deps, acceptingIo)
+
+    // PATCH was called this time with the stored secret from run 1.
+    assert.equal(mock.ghUpdateHookCalls, 1)
+    assert.equal(mock.ghUpdateHookLastHookId, 7)
+    const payload = mock.ghUpdateHookLastPayload as {
+      config: { secret: string; url: string }
+    }
+    assert.equal(payload.config.url, 'https://smee.io/partial')
+    assert.equal(payload.config.secret, 'a'.repeat(64))
+
+    // state.json on disk still has the same values — no drift.
+    const stateAfterSecondRun = JSON.parse(readFileSync(statePath, 'utf-8'))
+    assert.deepEqual(stateAfterSecondRun, stateAfterFirstRun)
   })
 
   test('dry-run: no state.json, no .mcp.json, no webhook POST', async () => {

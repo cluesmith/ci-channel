@@ -344,19 +344,20 @@ describe('runInstall — webhook secret freshness vs existing hook (silent-HMAC-
     )
   })
 
-  test('architect regression: decline at PATCH prompt → state.json is NOT written (prevents silent-HMAC break on next run)', async () => {
-    // Scenario from the architect's iter2 bug report:
-    //   1. User deletes state.json, leaves webhook in place
-    //   2. Re-runs setup; installer generates fresh secret
-    //   3. Finds matching hook, prompts "Update webhook?"
-    //   4. User declines
-    //   5. BEFORE FIX: state.json was already written with the fresh
-    //      secret, so next run would see secretWasGenerated=false and
-    //      skip the PATCH as idempotent — silent HMAC break forever.
-    //   6. AFTER FIX: state.json is written AFTER the webhook step, so
-    //      declining throws UserDeclinedError with state.json still
-    //      empty. Next run re-enters the PATCH path correctly.
-    const { deps, io, calls } = buildMockDepsAndIo({
+  test('iter6: decline at PATCH after state-first write → state IS persisted; recovery relies on iter5 always-PATCH, not on empty state', async () => {
+    // Historical scenario (architect iter2): user deletes state.json,
+    // leaves webhook in place, re-runs setup, declines the PATCH.
+    //
+    // In iter3/iter4 we guarded this by writing state AFTER the
+    // webhook to preserve "empty state → fresh PATCH on retry".
+    // iter6 reverses the order (state-first) because the iter5
+    // always-PATCH removes the need for empty-state recovery: the
+    // next run always reads the stored state, finds the matching
+    // hook, and re-PATCHes regardless of what's in state.json.
+    //
+    // The important invariant is NOT "state is empty after decline"
+    // but "next run cannot silently break". This test locks that in.
+    const { deps, calls } = buildMockDepsAndIo({
       existingState: {
         smeeUrl: 'https://smee.io/existing',
         // No webhookSecret — installer must regenerate
@@ -366,17 +367,26 @@ describe('runInstall — webhook secret freshness vs existing hook (silent-HMAC-
       ],
     })
 
-    // Mock Io that declines the reconcile confirmation.
+    // Scripted Io that accepts the smee + state prompts and declines
+    // the PATCH prompt (iter6 order: smee → state → webhook).
     let confirmCount = 0
+    const scriptedAnswers = [
+      // Smee: stored, no prompt — skipped (state.smeeUrl is set).
+      // State: prompt — accept so the write happens.
+      true,
+      // Webhook (PATCH): prompt — decline.
+      false,
+    ]
     const decliningIo: Io = {
       info: () => {},
       warn: () => {},
-      confirm: async (message: string) => {
+      confirm: async () => {
+        const answer = scriptedAnswers[confirmCount]
         confirmCount++
-        // iter5: the prompt is "Reconcile existing webhook ...?"
-        // (was "Update existing webhook..." in iter4).
-        assert.match(message, /Reconcile existing webhook/)
-        return false
+        if (answer === undefined) {
+          throw new Error(`unexpected confirm call #${confirmCount}`)
+        }
+        return answer
       },
       prompt: async () => {
         throw new Error('prompt should not be called')
@@ -393,18 +403,20 @@ describe('runInstall — webhook secret freshness vs existing hook (silent-HMAC-
         err.exitCode === 0,
     )
 
-    // Only the PATCH prompt was asked.
-    assert.equal(confirmCount, 1)
-    // Webhook PATCH was NOT called (user declined).
+    // Exactly two prompts reached: state-write (accepted), then
+    // webhook-reconcile (declined).
+    assert.equal(confirmCount, 2)
+    // Webhook PATCH was NOT called (declined).
     assert.equal(calls.ghUpdateHookCalls, 0)
-    // CRITICAL: state.json was NOT written. This is the bug fix —
-    // without it, the next run would see the freshly persisted secret
-    // and skip the PATCH path entirely, silently breaking HMAC validation.
+    // State IS written (iter6 ordering). This is safe because iter5
+    // removed the skip path — a subsequent run will always re-PATCH
+    // via the always-reconcile branch, regardless of what's in state.
+    assert.equal(calls.writeStateCalls, 1)
     assert.equal(
-      calls.writeStateCalls,
-      0,
-      'state.json must NOT be written when PATCH is declined — otherwise next run will skip the PATCH as idempotent and silently break HMAC',
+      calls.writeStateLastArg?.smeeUrl,
+      'https://smee.io/existing',
     )
+    assert.match(calls.writeStateLastArg?.webhookSecret ?? '', /^deadbeef/)
   })
 
   test('case F (iter4): stored secret but no stored URL + --smee-url + matching hook → PATCH (not skip)', async () => {
@@ -685,6 +697,164 @@ describe('runInstall — webhook secret freshness vs existing hook (silent-HMAC-
     // when the skip path was removed.
     const joined = calls.info.join('\n')
     assert.match(joined, /\[dry-run\] Would reconcile existing webhook/)
+  })
+})
+
+describe('runInstall — iter6 state-first ordering (orphan prevention)', () => {
+  // Iter6 rationale: in iter3/iter4, state was written AFTER the
+  // webhook to protect a now-deleted skip path. Iter5 removed the
+  // skip path, dissolving that constraint. Iter6 moves state BEFORE
+  // the webhook to close an orphan-webhook failure mode:
+  //
+  //   Fresh install with empty state:
+  //     1. Installer generates secret X + fetches smee URL Y
+  //     2. ghCreateHook succeeds — webhook at Y signs with X
+  //     3. writeState FAILS (disk full, SIGKILL, perms)
+  //     4. Next run reads empty state, generates NEW secret + fetches
+  //        a NEW smee URL, creates a SECOND webhook. The first is
+  //        now an orphan.
+  //
+  // Iter6 eliminates this by persisting state first: if the webhook
+  // step then fails, the next run reuses the stored {secret, smeeUrl}
+  // and finds either the orphan (PATCH-recovers) or nothing (re-
+  // creates with the same credentials — no orphan).
+
+  test('ghCreateHook throws → state.json was already written with the intended credentials', async () => {
+    const { deps, io, calls } = buildMockDepsAndIo({
+      existingState: {},
+      ghHooks: [],
+    })
+    // Override ghCreateHook to simulate a network/auth failure.
+    deps.ghCreateHook = async () => {
+      calls.ghCreateHookCalls++
+      throw new SetupError('gh api failed (exit 1): HTTP 503')
+    }
+
+    await assert.rejects(
+      () => runInstall(baseArgs(), deps, io),
+      (err: SetupError) =>
+        err instanceof SetupError && err.userMessage.includes('HTTP 503'),
+    )
+
+    // State was persisted BEFORE ghCreateHook ran.
+    assert.equal(calls.writeStateCalls, 1)
+    assert.equal(calls.writeStateLastArg?.smeeUrl, 'https://smee.io/fetched')
+    assert.match(calls.writeStateLastArg?.webhookSecret ?? '', /^deadbeef/)
+
+    // ghCreateHook was attempted (and threw).
+    assert.equal(calls.ghCreateHookCalls, 1)
+  })
+
+  test('ghUpdateHook throws → state.json was already written with the intended credentials', async () => {
+    const { deps, io, calls } = buildMockDepsAndIo({
+      existingState: {
+        smeeUrl: 'https://smee.io/existing',
+        // No webhookSecret — installer will regenerate
+      },
+      ghHooks: [
+        { id: 99, config: { url: 'https://smee.io/existing' } },
+      ],
+    })
+    deps.ghUpdateHook = async () => {
+      calls.ghUpdateHookCalls++
+      throw new SetupError('gh api failed (exit 1): HTTP 422')
+    }
+
+    await assert.rejects(
+      () => runInstall(baseArgs(), deps, io),
+      (err: SetupError) =>
+        err instanceof SetupError && err.userMessage.includes('HTTP 422'),
+    )
+
+    // State was persisted BEFORE ghUpdateHook ran.
+    assert.equal(calls.writeStateCalls, 1)
+    assert.equal(
+      calls.writeStateLastArg?.smeeUrl,
+      'https://smee.io/existing',
+    )
+    assert.match(calls.writeStateLastArg?.webhookSecret ?? '', /^deadbeef/)
+
+    // ghUpdateHook was attempted (and threw).
+    assert.equal(calls.ghUpdateHookCalls, 1)
+  })
+
+  test('retry after ghCreateHook failure: stored state is reused — no new smee URL, same credentials, no orphan', async () => {
+    // Simulate the end-to-end recovery: run 1 hits a network failure
+    // during ghCreateHook; run 2 succeeds. Run 2 must reuse the state
+    // from run 1 and must NOT fetch a new smee channel (which would
+    // create a second orphan webhook on GitHub).
+    const persistedState: PluginState = {}
+
+    // Shared mock that "persists" state across runs.
+    const cfg: MockConfig = {
+      existingState: persistedState,
+      ghHooks: [],
+    }
+
+    // --- Run 1: generates credentials, writeState persists them,
+    // then ghCreateHook throws ---
+    const run1 = buildMockDepsAndIo(cfg)
+    run1.deps.writeState = (_root, state) => {
+      run1.calls.writeStateCalls++
+      run1.calls.writeStateLastArg = { ...state }
+      // Simulate persistence: copy into the shared state object so
+      // buildMockDepsAndIo on run 2 sees it via existingState.
+      persistedState.webhookSecret = state.webhookSecret
+      persistedState.smeeUrl = state.smeeUrl
+    }
+    run1.deps.ghCreateHook = async () => {
+      run1.calls.ghCreateHookCalls++
+      throw new SetupError('gh api failed (exit 1): HTTP 503')
+    }
+
+    await assert.rejects(
+      () => runInstall(baseArgs(), run1.deps, run1.io),
+      (err: SetupError) =>
+        err instanceof SetupError && err.userMessage.includes('HTTP 503'),
+    )
+
+    // Run 1: state was written, ghCreateHook threw.
+    assert.equal(run1.calls.writeStateCalls, 1)
+    assert.equal(run1.calls.ghCreateHookCalls, 1)
+    assert.equal(run1.calls.fetchSmeeCalls, 1)
+    assert.equal(run1.calls.generateSecretCalls, 1)
+
+    // Capture the persisted credentials for the run-2 assertion.
+    const run1Secret = run1.calls.writeStateLastArg?.webhookSecret
+    const run1SmeeUrl = run1.calls.writeStateLastArg?.smeeUrl
+    assert.ok(run1Secret)
+    assert.ok(run1SmeeUrl)
+
+    // --- Run 2: state now has the persisted pair, ghCreateHook
+    // succeeds this time. Orphan prevention: the retry must use the
+    // SAME credentials from run 1, not generate fresh ones. ---
+    const run2 = buildMockDepsAndIo(cfg)
+
+    await runInstall(baseArgs(), run2.deps, run2.io)
+
+    // Key invariant: no new smee URL, no new secret.
+    assert.equal(
+      run2.calls.fetchSmeeCalls,
+      0,
+      'second run must NOT re-fetch smee URL — would create orphan',
+    )
+    assert.equal(
+      run2.calls.generateSecretCalls,
+      0,
+      'second run must NOT regenerate secret — would leave first hook orphaned',
+    )
+
+    // ghCreateHook called with the SAME credentials as run 1.
+    assert.equal(run2.calls.ghCreateHookCalls, 1)
+    const run2Payload = run2.calls.ghCreateHookLastArg?.payload as {
+      config: { url: string; secret: string }
+    }
+    assert.equal(run2Payload.config.url, run1SmeeUrl)
+    assert.equal(run2Payload.config.secret, run1Secret)
+
+    // State was not re-written on run 2 (already persisted from run 1,
+    // stateDiffers returns false).
+    assert.equal(run2.calls.writeStateCalls, 0)
   })
 })
 

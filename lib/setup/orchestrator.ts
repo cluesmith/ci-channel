@@ -145,13 +145,63 @@ export async function runInstall(
     )
   }
 
-  // --- Create or reconcile webhook (BEFORE writing state.json) ---
+  // --- Write state.json (BEFORE the webhook step) ---
   //
-  // Ordering rule: the webhook must be reconciled with our intended
-  // secret BEFORE state.json is written. Otherwise a decline/failure
-  // at the webhook step leaves state.json with a persisted fresh
-  // secret and no matching GitHub-side config — and the next run
-  // would (wrongly) treat the persisted state as idempotent.
+  // Ordering rule (iter6 — final): state.json is written BEFORE the
+  // webhook is created or reconciled. This closes an orphan-webhook
+  // failure mode specific to the CREATE path:
+  //
+  //   Fresh install → generate secret X + fetch smee URL Y. If we
+  //   ghCreateHook FIRST, the hook is created on GitHub with secret X
+  //   at URL Y. If writeState then fails (disk full, SIGKILL, power
+  //   loss), the webhook exists but there's no local record of {X, Y}.
+  //   The next run reads empty state, generates a DIFFERENT secret X'
+  //   and fetches a DIFFERENT smee URL Y', and creates a second
+  //   webhook — the first is now an orphan.
+  //
+  // Iter3/iter4 ordered webhook-first because the skip path trusted
+  // the stored state: writing state first could cause the next run's
+  // skip check to see a stored pair and incorrectly bypass the needed
+  // rotation. Iter5 removed the skip path entirely, which dissolves
+  // the iter3/iter4 constraint — the next run of the CREATE path
+  // will now use the stored {X, Y} pair to either find the same
+  // orphan and PATCH it (recovery) or create a fresh hook (no orphan).
+  //
+  // Either way, state-first is convergent on retry:
+  //   - writeState fails → no webhook created, next run starts fresh
+  //   - writeState OK + ghCreateHook fails → next run re-tries CREATE
+  //     with the stored smee URL, finding either the failed hook
+  //     (PATCH recovery) or nothing (clean re-create)
+  //   - writeState OK + ghUpdateHook fails or declined → next run
+  //     re-tries PATCH via the always-reconcile branch
+  //   - Both succeed → happy path
+  //
+  // This ordering is correct ONLY because iter5 removed the skip
+  // path. Do not reintroduce a "skip if stored pair matches" fast
+  // path without also re-examining this ordering.
+  const statePath = stateFilePath(projectRoot)
+  const stateChanged = stateDiffers(existingState, state)
+  if (args.dryRun) {
+    if (stateChanged) {
+      io.info(`[ci-channel setup] [dry-run] Would write ${statePath}`)
+    } else {
+      io.info(
+        `[ci-channel setup] [dry-run] state.json unchanged — would skip write`,
+      )
+    }
+  } else if (stateChanged) {
+    if (!(await io.confirm(`Write credentials to ${statePath}?`))) {
+      throw new UserDeclinedError('Stopped before writing state.json.')
+    }
+    deps.writeState(projectRoot, state)
+    io.info(`[ci-channel setup] Wrote ${statePath} (mode 0o600)`)
+  } else {
+    io.info(
+      `[ci-channel setup] state.json already has current values — skipping write`,
+    )
+  }
+
+  // --- Create or reconcile webhook (AFTER state.json is written) ---
   //
   // Webhook reconciliation model (iter5, after four iterations of
   // whack-a-mole on the skip path):
@@ -280,32 +330,6 @@ export async function runInstall(
   if (smeeUrlChanged) {
     io.warn(
       '[ci-channel setup] The old webhook for the previous smee URL is still in place. Delete it manually if no longer needed.',
-    )
-  }
-
-  // --- Write state.json (AFTER webhook is reconciled) ---
-  // Only reached when the webhook step succeeded (or was idempotently
-  // skipped). A failure or user decline above throws before reaching
-  // here, leaving state.json untouched so the next run can try again.
-  const statePath = stateFilePath(projectRoot)
-  const stateChanged = stateDiffers(existingState, state)
-  if (args.dryRun) {
-    if (stateChanged) {
-      io.info(`[ci-channel setup] [dry-run] Would write ${statePath}`)
-    } else {
-      io.info(
-        `[ci-channel setup] [dry-run] state.json unchanged — would skip write`,
-      )
-    }
-  } else if (stateChanged) {
-    if (!(await io.confirm(`Write credentials to ${statePath}?`))) {
-      throw new UserDeclinedError('Stopped before writing state.json.')
-    }
-    deps.writeState(projectRoot, state)
-    io.info(`[ci-channel setup] Wrote ${statePath} (mode 0o600)`)
-  } else {
-    io.info(
-      `[ci-channel setup] state.json already has current values — skipping write`,
     )
   }
 
