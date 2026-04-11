@@ -49,15 +49,15 @@ Re-running the setup command is idempotent on all three forges. If anything fail
 
 ### Uninstall: `ci-channel remove`
 
-The inverse of `setup` exists for all three forges with the same flag shape:
+Local-only cleanup, no flags:
 
 ```bash
-npx -y ci-channel remove --repo OWNER/REPO                                # GitHub
-npx -y ci-channel remove --forge gitlab --repo GROUP/PROJECT              # GitLab
-npx -y ci-channel remove --forge gitea --gitea-url URL --repo OWNER/REPO  # Gitea
+npx -y ci-channel remove
 ```
 
-`remove` deletes the forge webhook (404 on DELETE is treated as "already gone"), deletes `state.json`, strips the canonical `ci` entry from `.mcp.json` (leaves it alone if customized), and reverts the Codev integration if present. Running `remove` on a project with no `state.json` fails fast with `no ci-channel install detected in this project`.
+`remove` deletes `state.json`, strips the canonical `ci` entry from `.mcp.json` (leaves customized entries alone with a warning), and reverts the Codev integration if present. It does **NOT** delete the webhook on your forge — instead it prints the smee URL so you can delete the orphan webhook manually from the forge's webhooks UI. This avoids re-prompting for forge auth and keeps `remove` flag-free.
+
+The orphan webhook is harmless: it posts events to a smee URL that nobody listens to. Delete it at your leisure.
 
 **Current limitations**:
 - No `--yes`, `--dry-run`, `--rotate`, or `--smee-url` flags — running the command IS the confirmation. Edit `state.json` by hand if you need a specific smee channel.

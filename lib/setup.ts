@@ -280,118 +280,80 @@ export async function setup(argv: string[]): Promise<void> {
   }
 }
 
-interface RemoveState { smeeUrl?: string; webhookSecret?: string }
 interface McpEntry { command?: unknown; args?: unknown }
 interface McpFile { mcpServers?: Record<string, McpEntry> }
 interface CodevConfig { shell?: { architect?: string } }
-interface Hook { id: number; url?: string; config?: { url?: string } }
 
 export async function remove(argv: string[]): Promise<void> {
   try {
-    const { repo, forge, giteaUrl } = parseCommandArgs(argv, 'remove')
+    if (argv.length > 0) throw new Error(`Usage: ci-channel remove (no flags) — run from inside the project you want to uninstall`)
     const root = findProjectRoot()
     if (!root) throw new Error('No project root found (no .git/ or .mcp.json in any ancestor). Run this from inside the project you want to uninstall from.')
     log(`Project root: ${root}`)
-    log(`Target repo:  ${repo}`)
-    const statePath = join(root, '.claude', 'channels', 'ci', 'state.json')
-    if (!existsSync(statePath)) throw new Error(`no ci-channel install detected in this project (no state.json at ${statePath}). Nothing to uninstall.`)
-    let state: RemoveState
-    try { state = JSON.parse(readFileSync(statePath, 'utf-8')) as RemoveState }
-    catch (e) { throw new Error(`state.json at ${statePath} is unreadable or malformed: ${(e as Error).message}. Fix or delete the file, then retry.`) }
-    const smeeUrl = state.smeeUrl
-    if (typeof smeeUrl !== 'string' || !smeeUrl) throw new Error(`state.json at ${statePath} is missing a 'smeeUrl' field. Cannot match webhook. If you want to force a reinstall, delete state.json and re-run \`ci-channel setup\`.`)
-    let giteaToken: string | undefined
-    if (forge === 'gitea') {
-      const envPath = join(root, '.claude', 'channels', 'ci', '.env')
-      giteaToken = (process.env.GITEA_TOKEN ?? '').trim() || (readEnvToken(envPath, 'GITEA_TOKEN') ?? '').trim() || undefined
-      if (!giteaToken) throw new Error(`GITEA_TOKEN not set. Generate a token at ${giteaUrl}/user/settings/applications (scopes: write:repository) and add it to ${envPath} as GITEA_TOKEN=... or export GITEA_TOKEN in your shell.`)
-    }
-    if (forge === 'github') {
-      log(`Listing existing webhooks on ${repo}...`)
-      let hooks: Hook[]
-      try { hooks = (JSON.parse(await cliApi('gh', ['api', '--paginate', '--slurp', `repos/${repo}/hooks`], null)) as Hook[][]).flat() }
-      catch (e) { throw classifyForgeError('gh', e, repo) }
-      const hit = hooks.find((h) => h?.config?.url === smeeUrl)
-      if (!hit) log(`no matching webhook found on github; skipping webhook delete`)
-      else {
-        log(`Found webhook ${hit.id} on ${repo} — deleting...`)
-        try { await cliApi('gh', ['api', '--method', 'DELETE', `repos/${repo}/hooks/${hit.id}`], null); log(`Deleted webhook ${hit.id}`) }
-        // biome-ignore lint/suspicious/noExplicitAny: subprocess error shape
-        catch (e) { if (/HTTP 404|Not Found/i.test(String((e as any)?.stderr ?? ''))) log(`webhook ${hit.id} already deleted; continuing`); else throw classifyForgeError('gh', e, repo) }
-      }
-    } else if (forge === 'gitlab') {
-      const enc = encodeURIComponent(repo)
-      log(`Listing existing hooks on ${repo}...`)
-      let hooks: Hook[]
-      try { hooks = JSON.parse(await cliApi('glab', ['api', `projects/${enc}/hooks`], null)) as Hook[] }
-      catch (e) { throw classifyForgeError('glab', e, repo) }
-      const hit = Array.isArray(hooks) ? hooks.find((h) => h?.url === smeeUrl) : undefined
-      if (!hit) log(`no matching webhook found on gitlab; skipping webhook delete`)
-      else {
-        log(`Found webhook ${hit.id} on ${repo} — deleting...`)
-        try { await cliApi('glab', ['api', '--method', 'DELETE', `projects/${enc}/hooks/${hit.id}`], null); log(`Deleted webhook ${hit.id}`) }
-        // biome-ignore lint/suspicious/noExplicitAny: subprocess error shape
-        catch (e) { if (/HTTP 404|Not Found/i.test(String((e as any)?.stderr ?? ''))) log(`webhook ${hit.id} already deleted; continuing`); else throw classifyForgeError('glab', e, repo) }
-      }
+
+    // Delete local state.json
+    const stateDir = join(root, '.claude', 'channels', 'ci')
+    const statePath = join(stateDir, 'state.json')
+    let orphanSmeeUrl: string | undefined
+    if (existsSync(statePath)) {
+      try {
+        const state = JSON.parse(readFileSync(statePath, 'utf-8')) as { smeeUrl?: string }
+        if (typeof state.smeeUrl === 'string') orphanSmeeUrl = state.smeeUrl
+      } catch { /* malformed — still delete it */ }
+      unlinkSync(statePath)
+      log(`Deleted ${statePath}`)
     } else {
-      // gitea — LIST via giteaFetch (404 = hard fail); DELETE direct-fetch for 404-soft
-      const base = giteaUrl!.replace(/\/$/, '')
-      const url = `${base}/api/v1/repos/${repo}/hooks`
-      const authHdrs = { Authorization: `token ${giteaToken!}` }
-      log(`Listing existing hooks at ${url}...`)
-      const hooks = (await (await giteaFetch(url, { headers: authHdrs }, repo, base)).json()) as Hook[]
-      const hit = Array.isArray(hooks) ? hooks.find((h) => h?.config?.url === smeeUrl) : undefined
-      if (!hit) log(`no matching webhook found on gitea; skipping webhook delete`)
-      else {
-        log(`Found webhook ${hit.id} on ${repo} — deleting...`)
-        const ac = new AbortController()
-        const timer = setTimeout(() => ac.abort(), 10000)
-        let delResp: Response
-        try { delResp = await fetch(`${url}/${hit.id}`, { method: 'DELETE', headers: authHdrs, signal: ac.signal }) } finally { clearTimeout(timer) }
-        if (delResp.status === 404) log(`webhook ${hit.id} already deleted on gitea; continuing`)
-        else if (!delResp.ok) {
-          const body = await delResp.text().catch(() => '')
-          if (delResp.status === 403) throw new Error(`Access denied to '${repo}' hooks on ${base}. Your GITEA_TOKEN needs write:repository scope.`)
-          if (delResp.status === 401) throw new Error(`GITEA_TOKEN is invalid or expired. Generate a new one at ${base}/user/settings/applications.`)
-          throw new Error(`Gitea API error (status ${delResp.status}): ${body}`)
-        } else log(`Deleted webhook ${hit.id}`)
-      }
+      log(`no state.json at ${statePath} — skipping`)
     }
-    try { unlinkSync(statePath); log(`Deleted state.json`) }
-    // biome-ignore lint/suspicious/noExplicitAny: err is opaque
-    catch (e) { if ((e as any)?.code !== 'ENOENT') throw e; log(`state.json already gone`) }
+
+    // Remove ci entry from .mcp.json if it looks like ci-channel
     const mcpPath = join(root, '.mcp.json')
-    if (!existsSync(mcpPath)) log(`no .mcp.json found — skipping`)
-    else {
+    if (!existsSync(mcpPath)) {
+      log(`no .mcp.json found — skipping`)
+    } else {
       const mcp = JSON.parse(readFileSync(mcpPath, 'utf-8')) as McpFile
       const servers = mcp.mcpServers
-      if (servers == null || typeof servers !== 'object' || Array.isArray(servers)) log(`.mcp.json has no usable mcpServers object — skipping`)
-      else if (!('ci' in servers)) log(`no 'ci' entry in .mcp.json — skipping`)
-      else {
+      if (servers == null || typeof servers !== 'object' || Array.isArray(servers)) {
+        log(`.mcp.json has no usable mcpServers object — skipping`)
+      } else if (!('ci' in servers)) {
+        log(`no 'ci' entry in .mcp.json — skipping`)
+      } else {
         const entry = servers.ci
         if (entry && typeof entry === 'object' && entry.command === 'npx' && Array.isArray(entry.args) && entry.args.includes('ci-channel')) {
           delete servers.ci
           writeFileSync(mcpPath, JSON.stringify(mcp, null, 2) + '\n')
           log(`Removed 'ci' from ${mcpPath}`)
-        } else log(`warning: .mcp.json 'ci' entry not recognized — leaving alone`)
+        } else {
+          log(`warning: .mcp.json 'ci' entry not recognized — leaving alone`)
+        }
       }
     }
+
+    // Revert Codev integration if present
     const codevPath = join(root, '.codev', 'config.json')
     if (existsSync(codevPath)) {
       try {
         const config = JSON.parse(readFileSync(codevPath, 'utf-8')) as CodevConfig
         const architect = config.shell?.architect
         const needle = ` ${CODEV_FLAG}`
-        if (typeof architect !== 'string' || !architect) log(`.codev/config.json has no shell.architect — skipping (unexpected Codev shape)`)
-        else if (!architect.includes(needle)) log(`.codev/config.json does not load ci channel — nothing to revert`)
-        else {
+        if (typeof architect !== 'string' || !architect) {
+          log(`.codev/config.json has no shell.architect — skipping`)
+        } else if (!architect.includes(needle)) {
+          log(`.codev/config.json does not load ci channel — nothing to revert`)
+        } else {
           config.shell!.architect = architect.replace(needle, '')
           writeFileSync(codevPath, JSON.stringify(config, null, 2) + '\n')
           log(`Reverted .codev/config.json: architect session will no longer load ci channel`)
         }
-      } catch (e) { log(`warning: Codev revert failed: ${(e as Error).message}. Other cleanup succeeded; edit .codev/config.json manually to remove ${CODEV_FLAG} from shell.architect.`) }
+      } catch (e) {
+        log(`warning: Codev revert failed: ${(e as Error).message}. Other cleanup succeeded; edit .codev/config.json manually to remove ${CODEV_FLAG} from shell.architect.`)
+      }
     }
-    console.log(`\nDone. ci-channel removed from ${repo}.`)
+
+    console.log(`\nDone. Local ci-channel state removed from ${root}.`)
+    if (orphanSmeeUrl) {
+      console.error(`\n[ci-channel] Note: the webhook on your forge was NOT deleted. If you want to remove it, go to the repo's webhooks settings and delete the hook whose payload URL is:\n  ${orphanSmeeUrl}`)
+    }
   } catch (err) {
     console.error(`[ci-channel] remove failed: ${(err as Error).message}`)
     process.exit(1)

@@ -67,7 +67,7 @@ For Codev projects, the installer additionally updates `.codev/config.json` to a
 
 ### Uninstall
 
-Run `ci-channel remove --repo OWNER/REPO` (same `--forge gitlab|gitea` and `--gitea-url URL` flags as setup) to reverse the install — deletes the forge webhook, removes `state.json`, strips the canonical `ci` entry from `.mcp.json`, and reverts the Codev integration if present.
+Run `ci-channel remove` (no flags) from inside the project to tear down the LOCAL install — deletes `state.json`, strips the canonical `ci` entry from `.mcp.json`, and reverts the Codev integration if present. Does NOT delete the webhook on your forge; it prints the orphan smee URL so the user can delete it manually from the forge's webhooks UI.
 
 ### Manual / advanced
 

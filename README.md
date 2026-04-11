@@ -69,18 +69,21 @@ Re-running the command is idempotent — safe to run multiple times on any forge
 
 ## Uninstall
 
+From inside the project, with no flags:
+
 ```bash
-# GitHub (default)
-npx -y ci-channel remove --repo owner/your-project
-
-# GitLab
-npx -y ci-channel remove --forge gitlab --repo group/project
-
-# Gitea
-npx -y ci-channel remove --forge gitea --gitea-url https://gitea.example.com --repo owner/repo
+npx -y ci-channel remove
 ```
 
-`remove` is the inverse of `setup` — it deletes the forge webhook, removes `<project-root>/.claude/channels/ci/state.json`, strips the canonical `ci` entry from `.mcp.json`, and reverts the Codev integration if present. If `.mcp.json`'s `ci` entry has been customized, it is left alone with a warning. Running `remove` in a project with no `state.json` fails fast with "no ci-channel install detected in this project".
+`remove` tears down the **local** install:
+
+- Deletes `<project-root>/.claude/channels/ci/state.json`
+- Removes the `ci` entry from `<project-root>/.mcp.json` (if the entry looks like ci-channel; customized entries are left alone with a warning)
+- Reverts the Codev integration in `<project-root>/.codev/config.json` if present
+
+`remove` does **NOT** delete the webhook on your forge — that would require re-prompting for auth and the repo. Instead, it prints the smee URL of the orphan webhook so you can delete it manually from your forge's Settings > Webhooks page if you want. The orphan webhook is harmless: it posts events to a smee URL that nobody listens to.
+
+Works from any subdirectory of the project. No forge API calls, no auth, no flags.
 
 > **LLM agents**: See [INSTALL.md](INSTALL.md) for step-by-step installation instructions designed for AI agents to follow programmatically.
 
