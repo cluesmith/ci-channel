@@ -1,0 +1,35 @@
+All 18 setup tests pass, and the full suite of 191 tests passes cleanly. Let me verify the final constraints summary:
+
+**Constraint verification:**
+- `wc -l tests/setup.test.ts` = **399** (≤400 ✓)
+- Test count = **18** (≤20 ✓, 10 new as planned)
+- All 18 tests pass on local Darwin; win32 skips in place as planned
+- Full suite `npm test`: 191 pass, 0 fail ✓
+
+**Scenario coverage vs plan:**
+- Scenarios 1–7 unchanged ✓
+- Scenario 8 modified to use `--nonsense` instead of `--forge gitlab` ✓
+- GitLab (9–11): happy path + URL encoding + PUT idempotency + subgroup round-trip ✓
+- Gitea (12–15): happy path with type field + Auth header on GET/POST + Content-Type only on POST; PATCH omits type; missing token short-circuits before state write AND empty-string case; 401 preserves state-first ordering ✓
+- Codev (16–18): appends flag while preserving sibling fields (`builder`, `shell`); idempotent skip; silent no-op when `.codev/` absent ✓
+
+**Quality checks:**
+- `mkFakeGh` → `mkFakeCli(bin, name, responses)` generalization is clean, shared between `gh` and `glab`
+- `withGiteaServer` helper correctly uses `listen(0)` and tears down in `finally`
+- `inProject` correctly saves/restores `GITEA_TOKEN` (alongside `PATH` and `cwd`) — prevents dev-env leak
+- Scenario 14's empty-string sub-case correctly sets `GITEA_TOKEN=''` in the same `inProject` block
+- Scenario 15 uses the Scenario-5 pattern (seed only `smeeUrl`) to prove state-first ordering on the Gitea branch
+- Scenario 11 does a round-trip `decodeURIComponent` check, which matches the plan's intent
+- Scenario 16 asserts `builder` and `shell` sub-fields are untouched — exceeds the minimum and locks down the "only mutate `shell.architect`" rule
+- Scenarios 16–18 correctly inherit `skip: WIN` (plan's corrected win32 skip rule)
+
+No issues found for this phase. The tests are focused, well-scoped, hit every spec requirement, and actually pass.
+
+---
+VERDICT: APPROVE
+SUMMARY: All 18 setup tests pass; 399 lines (≤400); 10 new scenarios cover GitLab/Gitea/Codev exactly as planned with strong state-first and type-field assertions.
+CONFIDENCE: HIGH
+---
+
+KEY_ISSUES:
+- None
