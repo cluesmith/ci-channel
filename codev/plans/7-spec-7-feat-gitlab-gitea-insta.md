@@ -12,9 +12,9 @@ Extend the single-file `lib/setup.ts` installer (currently ~194 lines, GitHub-on
 
 **Per the spec's explicit rule**, docs updates (README, INSTALL, CLAUDE, AGENTS) are part of the implementation phase — not a separate "docs" phase. Tests are their own phase (same seam as Spec 5) because porch requires ≥2 phases and implementation-vs-tests is the only natural split that respects the spec's "single PR, single logical change" rule.
 
-**Phase 1 (`impl`)**: Extend `lib/setup.ts` with GitLab and Gitea branches, the Codev helper, and the `.env` parser. Update docs + bump version. Runs existing test suite to catch regressions. Phase 1 produces no NEW tests; existing 8 setup tests + all runtime/integration tests remain the regression gate.
+**Phase 1 (`impl`)**: Extend `lib/setup.ts` with GitLab and Gitea branches, the Codev helper, and the `.env` parser. Update docs + bump version. **Also modify the existing Scenario 8 in `tests/setup.test.ts`** (replace `--forge gitlab` with `--nonsense` in the "unknown flag" assertion) — this is a minimal test-file edit required for the Phase 1 `npm test` gate to pass, not a new test. Runs existing test suite to catch regressions. Phase 1 produces no NEW test scenarios; existing 7 setup tests + 1 modified (Scenario 8) + all runtime/integration tests remain the regression gate.
 
-**Phase 2 (`tests`)**: Add ≤12 new scenarios to `tests/setup.test.ts` covering GitLab (3), Gitea (4), and Codev (3) using the PATH-override fake-CLI pattern (generalized from `mkFakeGh` → `mkFakeCli`) and a local HTTP server for Gitea. Rewrite the existing Scenario 8 "unknown flag" assertion to use `--nonsense` instead of `--forge gitlab`.
+**Phase 2 (`tests`)**: Add ≤12 new scenarios to `tests/setup.test.ts` covering GitLab (3), Gitea (4), and Codev (3) using the PATH-override fake-CLI pattern (generalized from `mkFakeGh` → `mkFakeCli`) and a local HTTP server for Gitea.
 
 Both phases land in a single PR. The number of git commits is porch bookkeeping; if the PR reviewer prefers a single final commit, squash-merge at merge time.
 
@@ -71,13 +71,33 @@ Final `lib/setup.ts` must be ≤300 lines. Also update user-facing docs (README,
 #### Files
 
 - **Modify**: `lib/setup.ts` — extend the existing 194-line file
+- **Modify**: `tests/setup.test.ts` — minimal edit: rewrite Scenario 8's second assertion from `--forge gitlab` to `--nonsense` so the existing test still passes with the new valid `--forge` flag. See "Scenario 8 modification" below. NO new test scenarios in Phase 1.
 - **Modify**: `package.json` — version bump `0.3.1` → `0.4.0`
+- **Modify**: `package-lock.json` — version bump `0.3.1` → `0.4.0` in BOTH `version` fields (root line 3 and first package block line 9). Lockfile-only edit, no `npm install` re-run needed since no dependencies change.
 - **Modify**: `README.md` — add short GitLab + Gitea install examples (≤5 lines each)
 - **Modify**: `INSTALL.md` — add a pointer to `--forge gitlab` / `--forge gitea` as the recommended path
 - **Modify**: `CLAUDE.md` and `AGENTS.md` — update installation section to mention all three forges (keep in sync)
-- **Modify**: `codev/resources/arch.md` — one-line mention that `setup` supports GitLab + Gitea
+- **Modify**: `codev/resources/arch.md` — one-line mention that `setup` supports GitLab + Gitea. Builder should verify the architecture document has an appropriate section (e.g., "Key components" mentions `lib/setup.ts`) before editing; the file exists and is 250 lines, so a small edit is expected to land cleanly. If the architecture doc doesn't mention `setup.ts` at all, the update is a no-op and can be skipped without blocking the PR.
 
 No other files touched. **Do NOT modify `server.ts`** — the dispatch is already wired.
+
+##### Scenario 8 modification (Phase 1)
+
+Exact edit to `tests/setup.test.ts:194-197`:
+
+```typescript
+// Before:
+res = await runSetup(['--repo', 'foo/bar', '--forge', 'gitlab'])
+assert.equal(res.exitCode, 1)
+assert.match(res.stderr, /unexpected arg: --forge/)
+
+// After:
+res = await runSetup(['--repo', 'foo/bar', '--nonsense'])
+assert.equal(res.exitCode, 1)
+assert.match(res.stderr, /unexpected arg: --nonsense/)
+```
+
+This edit is **required** for Phase 1's `npm test` gate to pass once `lib/setup.ts` accepts `--forge` as a valid flag. Without it, the existing Scenario 8 would fail (or worse, attempt a real `glab` call). This is NOT a new test scenario — test count is unchanged.
 
 #### Implementation Sketch
 
@@ -99,19 +119,39 @@ Starting point: `lib/setup.ts` is currently 194 lines with `GhError` class, `ghA
 
 **4. `cliApi` subprocess helper (~25 lines)** — generalized `ghApi`. Takes a binary name (`'gh'` or `'glab'`), argv, and optional stdin body. Returns stdout or rejects with `{ bin, code, stderr, args }` on non-zero exit / ENOENT. Replaces existing `ghApi`.
 
-**5. Shared error classification helper (~20 lines)**
+**5. Shared error classification helper (~25 lines)**
 ```typescript
+// Error messages must match the spec's "Error classification" sections verbatim.
+// Do NOT paraphrase — reviewer will diff against the spec.
 function classifyForgeError(bin: 'gh' | 'glab', err: any, repo: string): Error {
-  if (err?.code === 'ENOENT') return new Error(`${bin} CLI not found. Install and authenticate it, then retry.`)
   const stderr = String(err?.stderr ?? '')
-  if (/HTTP 404|Not Found/i.test(stderr)) return new Error(`Could not find ${bin === 'glab' ? 'project' : 'repo'} '${repo}'. Check the spelling, or verify you have access (${bin} returned 404).`)
-  if (/HTTP 403|Forbidden/i.test(stderr)) return new Error(`Access denied to '${repo}' hooks. ${bin === 'glab' ? "Your glab token needs project maintainer+ and the 'api' scope." : "Your gh token needs the 'admin:repo_hook' scope."} Run \`${bin} auth login\` and retry.`)
-  if (/HTTP 401|Unauthorized|not logged in|authentication/i.test(stderr)) return new Error(`${bin} is not authenticated. Run \`${bin} auth login\` and retry.`)
-  return err instanceof Error ? err : new Error(String(err))
+  if (err?.code === 'ENOENT') {
+    return bin === 'gh'
+      ? new Error('gh CLI not found. Install from https://cli.github.com/ and run `gh auth login`.')
+      : new Error('glab CLI not found. Install from https://gitlab.com/gitlab-org/cli and run `glab auth login`.')
+  }
+  if (/HTTP 404|Not Found/i.test(stderr)) {
+    return bin === 'gh'
+      ? new Error(`Could not find repo '${repo}'. Check the spelling, or verify you have access (gh returned 404).`)
+      : new Error(`Could not find project '${repo}'. Check the spelling, or verify you have access (glab returned 404).`)
+  }
+  if (/HTTP 403|Forbidden/i.test(stderr)) {
+    return bin === 'gh'
+      ? new Error(`Access denied to '${repo}' webhooks. Your gh token likely needs the 'admin:repo_hook' scope. Run \`gh auth refresh -s admin:repo_hook\` and retry.`)
+      : new Error(`Access denied to '${repo}' hooks. Your glab token needs project maintainer/owner permission and the 'api' scope. Run \`glab auth login\` and retry.`)
+  }
+  if (/HTTP 401|Unauthorized|not logged in|authentication/i.test(stderr)) {
+    return new Error(`${bin} is not authenticated. Run \`${bin} auth login\` and retry.`)
+  }
+  // Fallback: reconstruct a readable message so we never stringify a plain {bin, code, stderr, args} object to "[object Object]"
+  if (err instanceof Error) return err
+  return new Error(`${bin} ${(err?.args ?? []).join(' ')} exited ${err?.code ?? '?'}: ${stderr.trim()}`)
 }
 ```
 - Replaces the existing `GhError.is404` / `.is403` / `.isAuth` getters
 - Called from the GitHub and GitLab branches' catch blocks
+- Error strings are taken verbatim from the spec's "Error classification" sections — the reviewer will diff them
+- Fallback branch avoids Gemini's "[object Object]" bug by reconstructing the message from `{bin, args, code, stderr}` fields
 
 **6. Common flow steps 1–2, 4–7, 9–11 (~65 lines)**
 - Parse args, find project root (existing)
@@ -242,14 +282,18 @@ async function codevIntegrate(root: string): Promise<void> {
 - [ ] `grep '"@inquirer\|"commander\|"yargs\|"dotenv\|"@gitbeaker\|"gitea-js\|"node-fetch\|"undici\|"axios' package.json` returns nothing
 - [ ] `git diff server.ts` returns nothing (server.ts unchanged)
 - [ ] `package.json` version is `0.4.0`
-- [ ] GitLab branch uses `PUT` for updates, not `PATCH` (grep: `'--method', 'PUT'` present)
+- [ ] `package-lock.json` version is `0.4.0` at BOTH the root (line 3) AND the first package block (line 9)
+- [ ] GitLab branch uses `PUT` for updates, not `PATCH` (code review — reviewer reads `lib/setup.ts` and confirms the `glab api` call for the update path uses `'--method', 'PUT'` as the argv sequence; no grep shell-quoting gotcha)
 - [ ] GitLab branch URL-encodes the repo path (grep: `encodeURIComponent(repo)` present)
 - [ ] Gitea update payload does NOT include `type` field (code review)
 - [ ] Gitea token is read from `process.env.GITEA_TOKEN` first, then `.env` file (code review)
 - [ ] Gitea token check happens BEFORE state provisioning / smee fetch (code review)
 - [ ] `.mcp.json` merge still uses `'ci' in servers` key-presence check
 - [ ] `.codev/config.json` wrapped in a local try/catch that warns and continues
-- [ ] `npm test` passes with the same test count as baseline (no new tests added in Phase 1; existing count recorded in commit message)
+- [ ] `classifyForgeError` fallback branch does NOT stringify a plain object to `[object Object]` (code review — should reconstruct from `{bin, args, code, stderr}` fields; see Gemini plan-review comment)
+- [ ] `classifyForgeError` error messages match the spec's "Error classification" sections verbatim (code review against spec)
+- [ ] Scenario 8 in `tests/setup.test.ts` has been updated to use `--nonsense` (or similar truly-unknown flag) instead of `--forge gitlab`
+- [ ] `npm test` passes with the same test count as baseline (Phase 1 adds no NEW scenarios; the Scenario 8 edit keeps the count unchanged; baseline recorded in commit message)
 - [ ] README / INSTALL / CLAUDE / AGENTS all mention GitLab + Gitea install examples
 
 #### Test Plan
@@ -321,15 +365,15 @@ No other files touched. In particular, no `lib/setup.ts` modifications "for test
 
 #### Scenario List (verbatim from spec, final numbering)
 
-**Pre-existing scenarios**:
-- 1. Fresh install with prepopulated state (GitHub, POST + `.mcp.json` created) — unchanged
-- 2. Idempotent re-run (GitHub, PATCH once) — unchanged
-- 3. State present, webhook missing (GitHub, CREATE with existing secret) — unchanged
-- 4. `.mcp.json` with other servers (GitHub) — unchanged
-- 5. CREATE failure → state written before POST (GitHub, state-first ordering) — unchanged
-- 6. Project root from subdirectory (GitHub) — unchanged
-- 7. No project root → exit 1 — unchanged
-- 8. Missing `--repo` OR unknown flag → exit 1 — **MODIFIED**. Second half of the test (`['--repo', 'foo/bar', '--forge', 'gitlab']`) is replaced with `['--repo', 'foo/bar', '--nonsense']` to preserve the "unknown flag" assertion without conflicting with Spec 7's valid `--forge gitlab` input.
+**Pre-existing scenarios (all unchanged in Phase 2 — Scenario 8 was already modified in Phase 1):**
+- 1. Fresh install with prepopulated state (GitHub, POST + `.mcp.json` created)
+- 2. Idempotent re-run (GitHub, PATCH once)
+- 3. State present, webhook missing (GitHub, CREATE with existing secret)
+- 4. `.mcp.json` with other servers (GitHub)
+- 5. CREATE failure → state written before POST (GitHub, state-first ordering)
+- 6. Project root from subdirectory (GitHub)
+- 7. No project root → exit 1
+- 8. Missing `--repo` OR unknown flag → exit 1 (second assertion uses `--nonsense`, not `--forge gitlab` — see Phase 1 "Scenario 8 modification")
 
 **New scenarios**:
 
@@ -395,10 +439,11 @@ Total: 18 tests (7 unchanged + 1 modified + 10 new). Well under the 20 cap, leav
 
 - Use `node:test` — same as existing `tests/setup.test.ts`
 - Skip GitHub + GitLab scenarios (9–11) on win32 (PATH-override shell script won't run)
-- Gitea HTTP-server scenarios (12–15) can run on win32 in principle, but skip for consistency if it saves complexity
-- Codev scenarios (16–18) run on all platforms since they don't require fake CLIs — they reuse the existing GitHub fake-gh scenarios' fake-`gh` setup
+- Gitea HTTP-server scenarios (12–15) can run on win32 in principle, but skip for consistency since they share the `inProject` helper which relies on POSIX PATH construction. Reviewer's call if they want to enable them on win32 later.
+- **Codev scenarios (16–18) ALSO skip on win32** — they reuse the GitHub fake-gh setup (a POSIX shell script at `mkFakeCli(bin, 'gh', ...)`), so inherit the same platform-skip as Scenarios 1–6. An earlier draft of this plan said they "run on all platforms"; that was wrong. Corrected.
+- **`GITEA_TOKEN` environment restoration**: Scenarios 12–15 all mutate `process.env.GITEA_TOKEN` (setting it, unsetting it, or reading from `.env` in absence of the env var). Any test that touches `GITEA_TOKEN` MUST save its original value in a `try` block and restore it in the matching `finally` block (same pattern `inProject` uses for `PATH` and `cwd`). Without restoration, a developer running tests locally with `GITEA_TOKEN` already exported in their shell would see scenarios leak state into each other. Implementation: extend `inProject` to also save/restore `process.env.GITEA_TOKEN` on every entry — this is a ~4-line addition and eliminates the risk across all scenarios without per-scenario boilerplate.
 - State.json seeding via `seedState` as-is
-- `fetchSmeeChannel` is still never called (all tests prepopulate state.json, except Scenario 15 which seeds `smeeUrl` only and expects the installer to compute a fresh secret — same pattern as existing Scenario 5)
+- `fetchSmeeChannel` is still never called. Scenarios 1–14 and 16–18 prepopulate `state.json` with both fields. **Scenario 15 alone seeds `state.json` with only `smeeUrl` (no `webhookSecret`)**, mirroring the existing Scenario 5 pattern: the installer loads state via `loadState(path)`, sees `smeeUrl` present but `webhookSecret` undefined, generates a fresh secret, writes the updated state (state-first ordering), and THEN hits the Gitea API which returns 401. This works because `loadState` is documented to return a partial `PluginState` object with individual fields possibly undefined (confirmed by reading `lib/state.ts`). If during impl the `loadState` return shape turns out to be incompatible with this pattern, Scenario 15 can be rewritten as "seed no state at all + intercept `fetchSmeeChannel` via a state-file race condition" — but that's a fallback; the primary approach should work as it does in Scenario 5.
 
 #### Acceptance Criteria
 
@@ -431,7 +476,7 @@ Revert the Phase 2 commit. `tests/setup.test.ts` returns to the 198-line, 8-test
 - **Risk**: `process.exit` interception leaks between tests if a Gitea HTTP server hang.
   - **Mitigation**: `runSetup` already intercepts `process.exit` via try/finally. Add the AbortController timeout check in Phase 1's `giteaFetch` helper to ensure no fetch hangs beyond 10s. Tests that expect failure should trigger the error path quickly (401/404 responses are sync on the server side).
 - **Risk**: Fake `glab` + real `gh` on the same test run means PATH must route both correctly.
-  - **Mitigation**: Both fake binaries live in the same `<root>/_bin/` directory. PATH prepends `_bin`. Tests that use only `glab` create only the `glab` script; `gh` is absent (no ENOENT because real `gh` on the system PATH still works, but if we want to prevent accidental real `gh` calls, write a `gh` script that exits non-zero with a diagnostic — belt and suspenders).
+  - **Mitigation**: Both fake binaries live in the same `<root>/_bin/` directory. PATH prepends `_bin`. Tests that use only `glab` create only the `glab` script; `gh` is absent from `_bin` so tests hit the real `gh` only if the GitLab code path accidentally spawns it (which would be a test-revealing bug). Do NOT add a belt-and-suspenders fake `gh` that exits non-zero — that costs lines against the tight 400-line budget for negligible benefit (per Claude plan-review comment).
 
 ---
 
@@ -488,7 +533,37 @@ Phase 2 strictly depends on Phase 1 because the tests import `setup` from `../li
 
 ## Expert Review
 
-_(To be filled after the plan-iter1 consultation completes.)_
+### Plan iteration 1 (Gemini, Codex, Claude)
+
+- **Gemini**: APPROVE, HIGH — two minor notes on `classifyForgeError` fallback string handling and exact ENOENT error strings
+- **Codex**: REQUEST_CHANGES, HIGH — five findings: Phase 1 can't pass its own `npm test` gate without Scenario 8 modification, missing `package-lock.json` version bump, Codev win32 skip inconsistency, `GITEA_TOKEN` env restoration, `classifyForgeError` GitLab messages not matching spec text
+- **Claude**: COMMENT, HIGH — five minor issues: Codev win32 skip self-contradiction (same as Codex #3), Scenario 15 `loadState` shape verification, Phase 1 grep acceptance criterion shell-quoting, optional belt-and-suspenders fake `gh`, `arch.md` section existence verification
+
+All substantive concerns folded in before the implement phase. Changes applied to this plan document:
+
+1. **Scenario 8 modification moved to Phase 1** (Codex #1). The plan previously claimed "Phase 1 modifies no test files" which is self-defeating: once `lib/setup.ts` accepts `--forge gitlab`, the existing Scenario 8 assertion flips. The fix is a one-line edit (`--nonsense` instead of `--forge gitlab`), not a new test scenario — test count is unchanged. Phase 1 "Files to modify" now lists `tests/setup.test.ts` with an explicit "Scenario 8 modification" subsection showing the exact before/after diff.
+
+2. **`package-lock.json` version bump added** (Codex #2). The plan now lists `package-lock.json` in Phase 1's modified files with explicit notes: two `version` fields (root line 3 + first package block line 9), both need to go `0.3.1 → 0.4.0`. No `npm install` rerun needed since no dependencies change. Phase 1 acceptance criteria gained a new item verifying both fields.
+
+3. **Codev win32 skip corrected** (Codex #3 + Claude #1). The plan previously claimed Codev scenarios 16–18 run on all platforms because they don't require fake CLIs. This was wrong: they reuse the GitHub fake-`gh` setup (a POSIX shell script), so they must skip on win32 too. The "Test implementation constraints" subsection now correctly states that scenarios 16–18 inherit the win32 skip from their chosen forge branch.
+
+4. **`GITEA_TOKEN` env restoration** (Codex #4). Added an explicit note to "Test implementation constraints" that any test touching `process.env.GITEA_TOKEN` must save and restore it in a `try/finally`. The preferred implementation extends `inProject` to also save/restore `GITEA_TOKEN` (4-line addition) so per-scenario boilerplate is unnecessary. Protects against local dev env leak.
+
+5. **`classifyForgeError` error messages made verbatim** (Codex #5 + Gemini #2). The code sketch now contains the exact error strings from the spec's "Error classification" sections — no paraphrasing. GitHub and GitLab branches have separate message templates because the 403 message in particular mentions different scopes/commands. Reviewer can diff the compiled file against the spec directly.
+
+6. **`classifyForgeError` fallback String(err) bug fixed** (Gemini #1). The sketch's last-resort branch previously used `new Error(String(err))`, which would render as `[object Object]` if the `cliApi` helper rejected with a plain `{bin, code, stderr, args}` object. Replaced with a reconstructed message: `new Error(\`${bin} ${(err?.args ?? []).join(' ')} exited ${err?.code ?? '?'}: ${stderr.trim()}\`)`. Acceptance criteria gained an item verifying this.
+
+7. **Scenario 15 `loadState` shape verification** (Claude #2). Added a note in "Test implementation constraints" explaining exactly why Scenario 15's seed-smeeUrl-only approach works: `loadState` returns a partial `PluginState` with individual fields possibly `undefined`. Reconfirmed this is the same pattern as existing Scenario 5. Provided a fallback rewrite strategy if the pattern breaks at impl time.
+
+8. **Phase 1 grep acceptance criterion reworded** (Claude #3). The criterion `grep -E "'--method', 'PUT'" lib/setup.ts` had shell-quoting ambiguity that could false-negative during review. Changed to "code review — reviewer reads `lib/setup.ts` and confirms the `glab api` call for the update path uses `'--method', 'PUT'` as the argv sequence; no grep shell-quoting gotcha."
+
+9. **Belt-and-suspenders fake `gh` dropped** (Claude #4). The plan previously suggested writing a fake `gh` that exits non-zero in GitLab tests as a defensive measure against accidental real-`gh` calls. Claude correctly noted this costs lines against the 400-line budget for negligible benefit. Removed; now explicitly states "Do NOT add a belt-and-suspenders fake `gh`".
+
+10. **`arch.md` section verification** (Claude #5). The plan now notes that the builder should verify `codev/resources/arch.md` has an appropriate section to edit before committing; if not, the update is a no-op and can be skipped without blocking the PR.
+
+### Plan iter1 verdict (post-revision)
+
+All three reviewers' substantive concerns are addressed. Codex's REQUEST_CHANGES is resolved by the Scenario 8 move + lockfile update + win32 skip fix + env restoration + error message alignment. Gemini's APPROVE-with-notes is resolved. Claude's COMMENT-with-minor-issues is resolved. Under ASPIR, no second consultation round is required — the plan auto-approves on porch `done` after verification checks pass.
 
 ## Notes
 
