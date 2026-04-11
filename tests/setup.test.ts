@@ -240,7 +240,7 @@ describe('ci-channel setup', () => {
       assert.equal(p.url, URL_); assert.equal(p.token, SECRET)
       assert.equal(p.pipeline_events, true); assert.equal(p.push_events, false)
       assert.equal(p.merge_requests_events, false); assert.equal(p.enable_ssl_verification, true)
-      assert.equal(readFileSync(join(root, '.mcp.json'), 'utf-8'), MCP_CI_ONLY)
+      assert.deepEqual(JSON.parse(readFileSync(join(root, '.mcp.json'), 'utf-8')).mcpServers.ci, { command: 'npx', args: ['-y', 'ci-channel', '--forge', 'gitlab'] })
     })
   })
 
@@ -293,7 +293,7 @@ describe('ci-channel setup', () => {
         assert.equal(reqs[0].headers['content-type'], undefined, 'GET should have no Content-Type header')
         assert.equal(reqs[1].method, 'POST'); assert.equal(reqs[1].headers['content-type'], 'application/json')
         assert.deepEqual(JSON.parse(reqs[1].body), { type: 'gitea', config: { url: URL_, content_type: 'json', secret: SECRET }, events: ['workflow_run'], active: true })
-        assert.equal(readFileSync(join(root, '.mcp.json'), 'utf-8'), MCP_CI_ONLY)
+        assert.deepEqual(JSON.parse(readFileSync(join(root, '.mcp.json'), 'utf-8')).mcpServers.ci, { command: 'npx', args: ['-y', 'ci-channel', '--forge', 'gitea', '--gitea-url', serverUrl] })
       })
     })
   })

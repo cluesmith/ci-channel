@@ -6,7 +6,6 @@ import { fetchSmeeChannel } from './bootstrap.js'
 import { findProjectRoot } from './project-root.js'
 import { loadState } from './state.js'
 
-const CI_MCP_ENTRY = { command: 'npx', args: ['-y', 'ci-channel'] }
 const CODEV_FLAG = '--dangerously-load-development-channels server:ci'
 const VALID_FORGES = ['github', 'gitlab', 'gitea'] as const
 type Forge = (typeof VALID_FORGES)[number]
@@ -269,12 +268,19 @@ export async function setup(argv: string[]): Promise<void> {
       }
     }
 
-    // .mcp.json key-presence merge (not truthiness); preserves user customizations
+    // .mcp.json key-presence merge (not truthiness); preserves user customizations.
+    // The ci entry is forge-specific so the runtime launches with the right forge:
+    //   github  → no extra args (default)
+    //   gitlab  → --forge gitlab
+    //   gitea   → --forge gitea --gitea-url <base>
     const mcpPath = join(root, '.mcp.json')
     const mcp = existsSync(mcpPath) ? JSON.parse(readFileSync(mcpPath, 'utf-8')) : {}
     const servers = mcp.mcpServers ?? {}
     if (!('ci' in servers)) {
-      mcp.mcpServers = { ...servers, ci: CI_MCP_ENTRY }
+      const ciArgs: string[] = ['-y', 'ci-channel']
+      if (forge !== 'github') ciArgs.push('--forge', forge)
+      if (forge === 'gitea') ciArgs.push('--gitea-url', giteaUrl!.replace(/\/$/, ''))
+      mcp.mcpServers = { ...servers, ci: { command: 'npx', args: ciArgs } }
       writeFileSync(mcpPath, JSON.stringify(mcp, null, 2) + '\n')
       log(`Registered 'ci' in ${mcpPath}`)
     } else {
