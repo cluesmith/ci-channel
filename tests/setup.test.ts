@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import http, { type IncomingMessage, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { setup } from '../lib/setup.js'
+import { setup, remove } from '../lib/setup.js'
 
 const WIN = process.platform === 'win32'
 const URL_ = 'https://smee.io/test-channel-abc'
@@ -61,7 +61,7 @@ function seedCodev(root: string, config: unknown): string {
 
 type Result = { exitCode: number | null; stderr: string }
 
-async function runSetup(argv: string[]): Promise<Result> {
+async function runCommand(fn: (argv: string[]) => Promise<void>, argv: string[]): Promise<Result> {
   const oExit = process.exit
   const oErrWrite = process.stderr.write.bind(process.stderr)
   let stderr = ''
@@ -69,11 +69,13 @@ async function runSetup(argv: string[]): Promise<Result> {
   // Capture stderr only; leave stdout alone so node:test TAP isn't swallowed.
   process.stderr.write = ((s: unknown) => { stderr += String(s); return true }) as typeof process.stderr.write
   process.exit = ((c?: number) => { exitCode = c ?? 0; throw new Error('__EXIT__') }) as never
-  try { await setup(argv) }
+  try { await fn(argv) }
   catch (e) { if ((e as Error).message !== '__EXIT__') throw e }
   finally { process.exit = oExit; process.stderr.write = oErrWrite }
   return { exitCode, stderr }
 }
+const runSetup = (argv: string[]) => runCommand(setup, argv)
+const runRemove = (argv: string[]) => runCommand(remove, argv)
 
 async function inProject(fn: (ctx: { root: string; bin: string }) => Promise<void>): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), 'ci-setup-'))
@@ -394,6 +396,185 @@ describe('ci-channel setup', () => {
       assert.equal(res.exitCode, null, `unexpected exit: ${res.stderr}`)
       assert.ok(!existsSync(join(root, '.codev')), '.codev/ should not exist')
       assert.doesNotMatch(res.stderr, /\.codev/, 'no Codev log lines when file absent')
+    })
+  })
+
+  // ========== ci-channel remove (Spec 8) ==========
+
+  test('R1. remove GitHub happy path + second run fails with "no install detected"', { skip: WIN }, async () => {
+    await inProject(async ({ root, bin }) => {
+      const statePath = seedState(root, { webhookSecret: SECRET, smeeUrl: URL_ })
+      writeFileSync(join(root, '.mcp.json'), MCP_CI_ONLY)
+      mkFakeCli(bin, 'gh', [{ stdout: JSON.stringify([[{ id: 42, config: { url: URL_ } }]]) }, { stdout: '{}' }])
+      const res = await runRemove(['--repo', 'foo/bar'])
+      assert.equal(res.exitCode, null, `unexpected exit: ${res.stderr}`)
+      assert.match(cliArgs(bin, 'gh', 1), /--paginate --slurp repos\/foo\/bar\/hooks/)
+      assert.match(cliArgs(bin, 'gh', 2), /api --method DELETE repos\/foo\/bar\/hooks\/42/)
+      assert.ok(!existsSync(statePath), 'state.json should be deleted')
+      const mcp = JSON.parse(readFileSync(join(root, '.mcp.json'), 'utf-8'))
+      assert.ok(!('ci' in (mcp.mcpServers ?? {})), 'ci entry should be removed')
+      assert.match(res.stderr, /Deleted webhook 42[\s\S]*Deleted state\.json[\s\S]*Removed 'ci'/)
+      // Second run: state.json gone → fail fast
+      const countBefore = cliCount(bin, 'gh')
+      const res2 = await runRemove(['--repo', 'foo/bar'])
+      assert.equal(res2.exitCode, 1)
+      assert.match(res2.stderr, /no ci-channel install detected/)
+      assert.equal(cliCount(bin, 'gh'), countBefore, 'second run must not call gh')
+    })
+  })
+
+  test('R2. remove GitHub with no matching webhook: skip DELETE, still clean up locally', { skip: WIN }, async () => {
+    await inProject(async ({ root, bin }) => {
+      const statePath = seedState(root, { webhookSecret: SECRET, smeeUrl: URL_ })
+      writeFileSync(join(root, '.mcp.json'), MCP_CI_ONLY)
+      mkFakeCli(bin, 'gh', [{ stdout: '[[]]' }])
+      const res = await runRemove(['--repo', 'foo/bar'])
+      assert.equal(res.exitCode, null, `unexpected exit: ${res.stderr}`)
+      assert.equal(cliCount(bin, 'gh'), 1, 'only LIST called, no DELETE')
+      assert.match(res.stderr, /no matching webhook found on github/)
+      assert.ok(!existsSync(statePath), 'state.json should be deleted')
+      const mcp = JSON.parse(readFileSync(join(root, '.mcp.json'), 'utf-8'))
+      assert.ok(!('ci' in (mcp.mcpServers ?? {})))
+    })
+  })
+
+  test('R3. remove GitHub with customized .mcp.json ci entry: leave entry alone, still delete state + webhook', { skip: WIN }, async () => {
+    await inProject(async ({ root, bin }) => {
+      const statePath = seedState(root, { webhookSecret: SECRET, smeeUrl: URL_ })
+      const customized = { mcpServers: { ci: { command: 'npx', args: ['-y', 'ci-channel'], env: { FOO: 'bar' } } } }
+      const mcpBefore = JSON.stringify(customized, null, 2) + '\n'
+      writeFileSync(join(root, '.mcp.json'), mcpBefore)
+      mkFakeCli(bin, 'gh', [{ stdout: JSON.stringify([[{ id: 42, config: { url: URL_ } }]]) }, { stdout: '{}' }])
+      const res = await runRemove(['--repo', 'foo/bar'])
+      assert.equal(res.exitCode, null, `unexpected exit: ${res.stderr}`)
+      assert.match(cliArgs(bin, 'gh', 2), /--method DELETE/)
+      assert.ok(!existsSync(statePath), 'state.json should be deleted')
+      // .mcp.json ci entry preserved (round-trip equal)
+      const mcpAfter = JSON.parse(readFileSync(join(root, '.mcp.json'), 'utf-8'))
+      assert.deepEqual(mcpAfter, customized)
+      assert.match(res.stderr, /does not match the canonical shape for --forge github/)
+    })
+  })
+
+  test('R4. remove without state.json OR state.json missing smeeUrl → fail fast, no mutations', { skip: WIN }, async () => {
+    await inProject(async ({ root, bin }) => {
+      // Case (a): no state.json at all
+      writeFileSync(join(root, '.mcp.json'), MCP_CI_ONLY)
+      mkFakeCli(bin, 'gh', [{ stdout: '[[]]' }, { stdout: '{}' }])
+      let res = await runRemove(['--repo', 'foo/bar'])
+      assert.equal(res.exitCode, 1)
+      assert.match(res.stderr, /no ci-channel install detected/)
+      assert.equal(cliCount(bin, 'gh'), 0, 'no gh call before precondition fail')
+      assert.equal(readFileSync(join(root, '.mcp.json'), 'utf-8'), MCP_CI_ONLY)
+      // Case (b): state.json present but missing smeeUrl
+      const statePath = seedState(root, { webhookSecret: SECRET })
+      const stateBefore = readFileSync(statePath, 'utf-8')
+      res = await runRemove(['--repo', 'foo/bar'])
+      assert.equal(res.exitCode, 1)
+      assert.match(res.stderr, /missing a 'smeeUrl' field/)
+      assert.equal(cliCount(bin, 'gh'), 0)
+      assert.equal(readFileSync(statePath, 'utf-8'), stateBefore, 'state.json untouched')
+      assert.equal(readFileSync(join(root, '.mcp.json'), 'utf-8'), MCP_CI_ONLY, '.mcp.json untouched')
+    })
+  })
+
+  test('R5. remove GitLab happy path: path-encoded LIST + DELETE, local cleanup', { skip: WIN }, async () => {
+    await inProject(async ({ root, bin }) => {
+      const statePath = seedState(root, { webhookSecret: SECRET, smeeUrl: URL_ })
+      const mcpBefore = JSON.stringify({ mcpServers: { ci: { command: 'npx', args: ['-y', 'ci-channel', '--forge', 'gitlab'] } } }, null, 2) + '\n'
+      writeFileSync(join(root, '.mcp.json'), mcpBefore)
+      mkFakeCli(bin, 'glab', [{ stdout: JSON.stringify([{ id: 77, url: URL_ }]) }, { stdout: '{}' }])
+      const res = await runRemove(['--repo', 'group/project', '--forge', 'gitlab'])
+      assert.equal(res.exitCode, null, `unexpected exit: ${res.stderr}`)
+      assert.match(cliArgs(bin, 'glab', 1), /api projects\/group%2Fproject\/hooks/)
+      assert.match(cliArgs(bin, 'glab', 2), /api --method DELETE projects\/group%2Fproject\/hooks\/77/)
+      assert.ok(!existsSync(statePath), 'state.json deleted')
+      const mcp = JSON.parse(readFileSync(join(root, '.mcp.json'), 'utf-8'))
+      assert.ok(!('ci' in (mcp.mcpServers ?? {})), 'ci entry removed')
+    })
+  })
+
+  test('R6. remove Gitea happy path: GET + DELETE with Authorization header', { skip: WIN }, async () => {
+    await inProject(async ({ root }) => {
+      const statePath = seedState(root, { webhookSecret: SECRET, smeeUrl: URL_ })
+      writeEnv(root, 'GITEA_TOKEN=fake-token\n')
+      await withGiteaServer((req, res) => {
+        if (req.method === 'GET') { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify([{ id: 99, config: { url: URL_ } }])) }
+        else { res.writeHead(204); res.end() }
+      }, async (serverUrl, reqs) => {
+        const mcpBefore = JSON.stringify({ mcpServers: { ci: { command: 'npx', args: ['-y', 'ci-channel', '--forge', 'gitea', '--gitea-url', serverUrl] } } }, null, 2) + '\n'
+        writeFileSync(join(root, '.mcp.json'), mcpBefore)
+        const res = await runRemove(['--repo', 'owner/repo', '--forge', 'gitea', '--gitea-url', serverUrl])
+        assert.equal(res.exitCode, null, `unexpected exit: ${res.stderr}`)
+        assert.equal(reqs.length, 2)
+        assert.equal(reqs[0].method, 'GET'); assert.equal(reqs[0].url, '/api/v1/repos/owner/repo/hooks')
+        assert.equal(reqs[0].headers.authorization, 'token fake-token')
+        assert.equal(reqs[1].method, 'DELETE'); assert.equal(reqs[1].url, '/api/v1/repos/owner/repo/hooks/99')
+        assert.equal(reqs[1].headers.authorization, 'token fake-token')
+        assert.ok(!existsSync(statePath), 'state.json deleted')
+        const mcp = JSON.parse(readFileSync(join(root, '.mcp.json'), 'utf-8'))
+        assert.ok(!('ci' in (mcp.mcpServers ?? {})), 'ci entry removed')
+      })
+    })
+  })
+
+  test('R7. remove Gitea missing token → exit 1, state.json intact, no HTTP request', { skip: WIN }, async () => {
+    await inProject(async ({ root }) => {
+      const statePath = seedState(root, { webhookSecret: SECRET, smeeUrl: URL_ })
+      const stateBefore = readFileSync(statePath, 'utf-8')
+      await withGiteaServer((_req, res) => { res.writeHead(500); res.end() }, async (serverUrl, reqs) => {
+        const res = await runRemove(['--repo', 'owner/repo', '--forge', 'gitea', '--gitea-url', serverUrl])
+        assert.equal(res.exitCode, 1)
+        assert.match(res.stderr, /GITEA_TOKEN not set/)
+        assert.equal(reqs.length, 0, 'no HTTP request before token check')
+        assert.equal(readFileSync(statePath, 'utf-8'), stateBefore, 'state.json still exists and byte-equal')
+      })
+    })
+  })
+
+  test('R8. remove with Codev integration: architect flag stripped with leading space', { skip: WIN }, async () => {
+    await inProject(async ({ root, bin }) => {
+      seedState(root, { webhookSecret: SECRET, smeeUrl: URL_ })
+      writeFileSync(join(root, '.mcp.json'), MCP_CI_ONLY)
+      const codevPath = seedCodev(root, { shell: { architect: `claude --dangerously-skip-permissions ${CODEV_FLAG}`, builder: 'claude' } })
+      mkFakeCli(bin, 'gh', [{ stdout: JSON.stringify([[{ id: 42, config: { url: URL_ } }]]) }, { stdout: '{}' }])
+      const res = await runRemove(['--repo', 'foo/bar'])
+      assert.equal(res.exitCode, null, `unexpected exit: ${res.stderr}`)
+      const updated = JSON.parse(readFileSync(codevPath, 'utf-8'))
+      assert.equal(updated.shell.architect, 'claude --dangerously-skip-permissions', 'loader flag + leading space stripped')
+      assert.equal(updated.shell.builder, 'claude', 'builder untouched')
+      assert.match(res.stderr, /Reverted \.codev\/config\.json/)
+    })
+  })
+
+  test('R9. remove DELETE-404 race: treat as already-gone, continue, exit 0', { skip: WIN }, async () => {
+    await inProject(async ({ root, bin }) => {
+      const statePath = seedState(root, { webhookSecret: SECRET, smeeUrl: URL_ })
+      writeFileSync(join(root, '.mcp.json'), MCP_CI_ONLY)
+      mkFakeCli(bin, 'gh', [
+        { stdout: JSON.stringify([[{ id: 42, config: { url: URL_ } }]]) },
+        { stdout: '', stderr: 'HTTP 404: Not Found (https://api.github.com/repos/foo/bar/hooks/42)', exit: 1 },
+      ])
+      const res = await runRemove(['--repo', 'foo/bar'])
+      assert.equal(res.exitCode, null, `unexpected exit: ${res.stderr}`)
+      assert.match(res.stderr, /already deleted/)
+      assert.ok(!existsSync(statePath), 'state.json deleted despite 404 on DELETE')
+      const mcp = JSON.parse(readFileSync(join(root, '.mcp.json'), 'utf-8'))
+      assert.ok(!('ci' in (mcp.mcpServers ?? {})), 'ci entry removed')
+    })
+  })
+
+  test('R10. remove LIST-404 hard fail: repo not found, no local mutations', { skip: WIN }, async () => {
+    await inProject(async ({ root, bin }) => {
+      const statePath = seedState(root, { webhookSecret: SECRET, smeeUrl: URL_ })
+      const stateBefore = readFileSync(statePath, 'utf-8')
+      writeFileSync(join(root, '.mcp.json'), MCP_CI_ONLY)
+      mkFakeCli(bin, 'gh', [{ stdout: '', stderr: 'HTTP 404: Not Found (https://api.github.com/repos/foo/bar/hooks)', exit: 1 }])
+      const res = await runRemove(['--repo', 'foo/bar'])
+      assert.equal(res.exitCode, 1)
+      assert.match(res.stderr, /Could not find repo 'foo\/bar'/)
+      assert.equal(readFileSync(statePath, 'utf-8'), stateBefore, 'state.json still exists and byte-equal')
+      assert.equal(readFileSync(join(root, '.mcp.json'), 'utf-8'), MCP_CI_ONLY, '.mcp.json untouched')
     })
   })
 })
