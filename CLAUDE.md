@@ -25,13 +25,15 @@ See `codev/resources/arch.md` for the full architecture document.
 
 ## Configuration
 
-Structural config via CLI args in `.mcp.json`, secrets in `~/.claude/channels/ci/.env`.
+**State is project-scoped** as of v0.2.0. Each project gets its own `<project-root>/.claude/channels/ci/state.json` and `<project-root>/.claude/channels/ci/.env`. Project root is detected by walking up from `process.cwd()` looking for `.mcp.json` or `.git/` (see `lib/project-root.ts`). The legacy global path `~/.claude/channels/ci/` is only used as a fallback when no project root is detectable.
+
+Structural config via CLI args in `.mcp.json`; secrets in `<project-root>/.claude/channels/ci/.env`; auto-provisioned state in `<project-root>/.claude/channels/ci/state.json`.
 
 **CLI args**: `--forge`, `--repos`, `--workflow-filter`, `--reconcile-branches`, `--port`, `--gitea-url`, `--smee-url`
 
 **Secrets**: `WEBHOOK_SECRET` (auto-generated), `GITEA_TOKEN`
 
-**Precedence**: CLI args > env vars > `.env` file
+**Precedence**: CLI args > env vars > `.env` file > `state.json`
 
 ## Key Locations
 
@@ -45,8 +47,9 @@ Structural config via CLI args in `.mcp.json`, secrets in `~/.claude/channels/ci
 
 ```bash
 npm install          # Install dependencies
-npm test             # Run all tests (170 tests across 11 files)
-npx tsx server.ts    # Start the server
+npm test             # Run all tests
+npm run build        # Compile TypeScript to dist/ (for publishing)
+npx tsx server.ts    # Start the server directly from source
 ```
 
 ## Codev Workflow
