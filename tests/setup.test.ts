@@ -55,14 +55,9 @@ async function runSetup(argv: string[]): Promise<Result> {
   // Capture stderr only; leave stdout alone so node:test TAP isn't swallowed.
   process.stderr.write = ((s: unknown) => { stderr += String(s); return true }) as typeof process.stderr.write
   process.exit = ((c?: number) => { exitCode = c ?? 0; throw new Error('__EXIT__') }) as never
-  try {
-    await setup(argv)
-  } catch (e) {
-    if ((e as Error).message !== '__EXIT__') throw e
-  } finally {
-    process.exit = oExit
-    process.stderr.write = oErrWrite
-  }
+  try { await setup(argv) }
+  catch (e) { if ((e as Error).message !== '__EXIT__') throw e }
+  finally { process.exit = oExit; process.stderr.write = oErrWrite }
   return { exitCode, stderr }
 }
 
@@ -192,9 +187,12 @@ describe('ci-channel setup', () => {
     }
   })
 
-  test('8. missing --repo → exit 1 with usage message', async () => {
-    const res = await runSetup([])
+  test('8. missing --repo OR unknown flag → exit 1 with usage message', async () => {
+    let res = await runSetup([])
     assert.equal(res.exitCode, 1)
     assert.match(res.stderr, /--repo/)
+    res = await runSetup(['--repo', 'foo/bar', '--forge', 'gitlab'])
+    assert.equal(res.exitCode, 1)
+    assert.match(res.stderr, /unexpected arg: --forge/)
   })
 })

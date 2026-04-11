@@ -9,12 +9,17 @@ import { loadState } from './state.js'
 const CI_MCP_ENTRY = { command: 'npx', args: ['-y', 'ci-channel'] }
 
 function parseArgs(argv: string[]): { repo: string } {
+  let repo: string | undefined
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--repo' && i + 1 < argv.length) {
-      return { repo: argv[i + 1] }
+      repo = argv[i + 1]
+      i++
+    } else {
+      throw new Error(`Usage: ci-channel setup --repo owner/repo (unexpected arg: ${argv[i]})`)
     }
   }
-  throw new Error('Usage: ci-channel setup --repo owner/repo')
+  if (!repo) throw new Error('Usage: ci-channel setup --repo owner/repo')
+  return { repo }
 }
 
 function ghApi(args: string[], stdinBody: string | null): Promise<string> {
