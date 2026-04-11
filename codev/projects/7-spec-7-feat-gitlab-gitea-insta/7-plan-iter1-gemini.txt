@@ -1,0 +1,12 @@
+---
+VERDICT: APPROVE
+SUMMARY: Excellent and highly detailed plan that perfectly addresses the spec requirements and constraints.
+CONFIDENCE: HIGH
+---
+
+KEY_ISSUES:
+- None.
+
+**Minor Notes for the Builder:**
+- In the `classifyForgeError` sketch, the fallback return is `new Error(String(err))`. If the `cliApi` helper rejects with a plain object like `{ bin, code, stderr, args }`, `String(err)` will evaluate to `[object Object]`. To prevent breaking the existing "unclassified error" GitHub test (Scenario 5) and to provide useful output, ensure the fallback error reconstructs a readable string (e.g., `new Error(\`${bin} ${err.args?.join(' ')} exited ${err.code}: ${err.stderr}\`)`) instead of stringifying the raw object.
+- The `classifyForgeError` sketch uses a generic `ENOENT` error message (`Install and authenticate it...`). The spec explicitly dictates slightly different `ENOENT` string templates containing the exact download URLs for `gh` vs `glab`. Ensure you use the exact string templates provided in the spec's Error Classification sections.

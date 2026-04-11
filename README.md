@@ -35,16 +35,24 @@ Forge (GitHub/GitLab/Gitea)
 Run this from inside the project you want to monitor:
 
 ```bash
+# GitHub (default)
 cd /path/to/your-project
 npx -y ci-channel setup --repo owner/your-project
+
+# GitLab
+npx -y ci-channel setup --forge gitlab --repo group/project
+
+# Gitea (requires GITEA_TOKEN in <project>/.claude/channels/ci/.env or the environment)
+npx -y ci-channel setup --forge gitea --gitea-url https://gitea.example.com --repo owner/repo
 ```
 
 That's it. The installer:
 1. Generates a webhook secret
 2. Provisions a smee.io relay channel
 3. Writes `<project-root>/.claude/channels/ci/state.json` (mode `0o600`)
-4. Creates the GitHub webhook via `gh api`
+4. Creates (or updates) the webhook on the forge via `gh api` / `glab api` / Gitea REST API
 5. Registers the `ci` MCP server in `<project-root>/.mcp.json`
+6. If `<project-root>/.codev/config.json` exists, appends `--dangerously-load-development-channels server:ci` to its `shell.architect` command so Codev architect sessions automatically load the channel
 
 Then launch Claude Code with the channel enabled:
 
@@ -52,9 +60,12 @@ Then launch Claude Code with the channel enabled:
 claude --dangerously-load-development-channels server:ci
 ```
 
-**Requires**: `gh` CLI installed and authenticated (`gh auth status`). Re-running the command is idempotent — safe to run multiple times.
+**Requirements per forge**:
+- **GitHub**: `gh` CLI installed and authenticated (`gh auth status`)
+- **GitLab**: `glab` CLI installed and authenticated (`glab auth status`). For self-hosted GitLab, point `glab` at your instance via `glab auth login` or `GITLAB_URI` first — we don't take a `--gitlab-url` flag
+- **Gitea**: a Gitea API token with `write:repository` scope. Put it in `<project-root>/.claude/channels/ci/.env` as `GITEA_TOKEN=...` or `export GITEA_TOKEN=...` in your shell before running setup. The `--gitea-url` flag points at your Gitea instance.
 
-GitHub-only in v0.3.0. For GitLab/Gitea, use the [manual setup flow](#manual-setup-advanced--gitlab--gitea) below.
+Re-running the command is idempotent — safe to run multiple times on any forge.
 
 > **LLM agents**: See [INSTALL.md](INSTALL.md) for step-by-step installation instructions designed for AI agents to follow programmatically.
 
@@ -149,13 +160,19 @@ WEBHOOK_SECRET=your-webhook-secret
 
 ### GitLab CI
 
-**Setup** (run from your project directory):
+**Recommended** — one-command installer:
+```bash
+npx -y ci-channel setup --forge gitlab --repo group/project
+claude --dangerously-load-development-channels server:ci
+```
+
+For nested namespaces, use the exact `path_with_namespace` value: `--repo group/subgroup/project`. Requires `glab` CLI installed and authenticated.
+
+**Manual setup** (run from your project directory):
 ```bash
 claude mcp add-json --scope project ci '{"command":"npx","args":["-y","ci-channel","--forge","gitlab","--repos","group/project"]}'
 claude --dangerously-load-development-channels server:ci
 ```
-
-For nested namespaces, use the exact `path_with_namespace` value: `--repos "group/subgroup/project"`.
 
 **Webhook configuration** — Go to your GitLab project: **Settings > Webhooks > Add new webhook**
 
@@ -176,7 +193,15 @@ WEBHOOK_SECRET=your-gitlab-secret-token
 
 ### Gitea Actions
 
-**Setup** (run from your project directory):
+**Recommended** — one-command installer (after adding `GITEA_TOKEN=...` to `<project-root>/.claude/channels/ci/.env` or exporting it in your shell):
+```bash
+npx -y ci-channel setup --forge gitea --gitea-url https://your-gitea-instance.com --repo owner/repo
+claude --dangerously-load-development-channels server:ci
+```
+
+The `GITEA_TOKEN` must have `write:repository` scope — generate one at `<gitea-url>/user/settings/applications`.
+
+**Manual setup** (run from your project directory):
 ```bash
 claude mcp add-json --scope project ci '{"command":"npx","args":["-y","ci-channel","--forge","gitea","--gitea-url","https://your-gitea-instance.com","--repos","owner/repo"]}'
 claude --dangerously-load-development-channels server:ci
@@ -207,26 +232,16 @@ GITEA_TOKEN=your-gitea-api-token
 
 ### Codev Projects
 
-If you use [Codev](https://github.com/cluesmith/codev) for AI-assisted development, you can add ci-channel to your architect session so CI notifications arrive while you work.
+If you use [Codev](https://github.com/cluesmith/codev) for AI-assisted development, the installer auto-wires ci-channel into your architect session. Just run it in the Codev project:
 
-**Step 1: Run the installer in your Codev project:**
 ```bash
 cd /path/to/your-codev-project
-npx -y ci-channel setup --repo owner/your-codev-project
+npx -y ci-channel setup --repo owner/your-codev-project   # or --forge gitlab/gitea
 ```
 
-**Step 2: Update `.codev/config.json`** to add the channel flag to the architect command:
-```json
-{
-  "shell": {
-    "architect": "claude --dangerously-skip-permissions --dangerously-load-development-channels server:ci",
-    "builder": "claude --dangerously-skip-permissions",
-    "shell": "bash"
-  }
-}
-```
+If `<project-root>/.codev/config.json` exists, the installer appends `--dangerously-load-development-channels server:ci` to `shell.architect` (and only that field — `shell.builder` and all other fields are left untouched). Re-running is idempotent: if the flag is already present, the installer logs and skips.
 
-The architect session will now receive CI notifications in real-time. Builders don't need the channel — they focus on implementation.
+Builders don't need the channel — they focus on implementation.
 
 ## Configuration Reference
 

@@ -1,0 +1,44 @@
+I've reviewed the plan against the actual codebase state. Key verifications:
+
+- `lib/setup.ts` is indeed 194 lines; current `parseArgs` is a single-loop that throws on any unknown arg
+- `tests/setup.test.ts` is indeed 198 lines, 8 tests, with Scenario 8 currently asserting `--forge gitlab` → `/unexpected arg: --forge/` (so the rewrite is necessary)
+- `package.json` version is `0.3.1`; no forbidden deps present
+- Existing test 5 asserts only `/setup failed/` (not specific message text), so `GhError → classifyForgeError` refactor is safe for that test
+- No other tests inspect error classification messages, so the `GhError` removal is behaviorally safe as long as messages remain substantively equivalent
+
+## Assessment
+
+**Alignment with spec**: Excellent. The plan faithfully translates every substantive requirement from the spec — token-check-before-state-provisioning, GitLab PUT (not PATCH), GitLab top-level `h.url`, Gitea update payload without `type`, Codev local try/catch, state-first ordering, `.env` `export`-prefix handling, empty-token-as-missing, `.mcp.json` key-presence check. Acceptance criteria for Phase 1 directly map to the spec's review gate.
+
+**Architecture**: Correctly rejects module splits, DI, and strategy registries. Single-file `if/else if/else` on `forge` is what the spec asks for. The ~302-line pre-budget matches the spec's pessimistic estimate with the same mitigation strategy (compress, don't extract).
+
+**Phase breakdown**: Two phases (impl + tests) is the minimum porch accepts and the right split. Docs folded into Phase 1 per spec directive.
+
+**Testing strategy**: Sound. `mkFakeGh → mkFakeCli` generalization is the right move. Local `http.createServer` with `listen(0)` for Gitea is correct. Scenario coverage (3 GitLab + 4 Gitea + 3 Codev + modified Scenario 8) matches the spec's minimums with 2 slots of headroom.
+
+## Minor Issues
+
+1. **Platform-skip inconsistency for Codev tests (16-18)**: The plan says "Codev scenarios (16–18) run on all platforms since they don't require fake CLIs — they reuse the existing GitHub fake-gh scenarios' fake-`gh` setup." This is self-contradictory. Since they reuse fake `gh` (a POSIX shell script), they must also `skip: WIN`. The spec's stance is that fake-CLI scenarios skip on win32. Please clarify in the plan that Codev scenarios inherit the win32 skip from their chosen forge branch.
+
+2. **Scenario 15 structure note**: The plan reasonably rewrites Scenario 15 to seed `state.json` with only `smeeUrl` (no secret) to avoid invoking real `fetchSmeeChannel` — mirroring existing Scenario 5. This is correct, but verify during implementation that `loadState` returns a mutable object with `smeeUrl` present and `webhookSecret` undefined so the code path hits the "generate new secret, then write state, then call API" flow as expected.
+
+3. **Belt-and-suspenders fake `gh` in GitLab scenarios**: The plan suggests writing a fake `gh` script that exits non-zero to prevent accidental real-`gh` calls during GitLab tests. This is a nice defensive touch but adds lines. Since the GitLab code path never calls `gh`, it's optional — just noting that it could be dropped if budget is tight.
+
+4. **Phase 1 `grep` acceptance criterion quoting**: The criterion `grep -E "'--method', 'PUT'" lib/setup.ts` uses quoted-string matching that a reviewer may stumble on (it's checking for the literal TypeScript argv element). Consider restating as "GitLab update uses `--method` followed by `PUT` argv element" to avoid shell-quoting ambiguity during review.
+
+5. **`codev/resources/arch.md` existence**: The plan says it'll add "one line added under the setup section" to `codev/resources/arch.md`. Builder should verify the file and section exist before editing; if not, either create the section or drop the update.
+
+None of these are blockers — the plan is implementation-ready.
+
+---
+VERDICT: COMMENT
+SUMMARY: Plan is thorough, spec-aligned, and implementable; one self-contradiction on Codev test platform-skip and a few minor clarifications.
+CONFIDENCE: HIGH
+---
+
+KEY_ISSUES:
+- Codev scenarios 16-18 are described as running on all platforms but reuse fake-`gh`; they must also skip on win32. Clarify the skip directive.
+- Scenario 15 rewrite relies on `loadState` returning `smeeUrl` present + `webhookSecret` undefined so the installer generates a fresh secret and writes state before the 401; verify this flow during impl.
+- Phase 1 grep-based acceptance criterion for PUT detection has awkward shell-quoting; restate as a code-review check to avoid false negatives.
+- Optional belt-and-suspenders fake `gh` in GitLab tests adds lines against a tight 400-line budget — can be dropped if needed.
+- Verify `codev/resources/arch.md` has an appropriate section to edit before committing to the one-line update.

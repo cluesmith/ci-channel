@@ -1,0 +1,13 @@
+---
+VERDICT: COMMENT
+SUMMARY: Excellent spec, very thorough and well-scoped, but minor contradiction regarding Test 8
+CONFIDENCE: HIGH
+---
+
+KEY_ISSUES:
+- **Test 8 Contradiction**: The spec states "the 8 scenarios from Spec 5 stay exactly as they are" and "All existing tests continue to pass (baseline recorded in the impl phase commit message)." However, Test 8 in `tests/setup.test.ts` explicitly asserts that `runSetup(['--repo', 'foo/bar', '--forge', 'gitlab'])` will fail with an "unexpected arg: --forge" error. Since `--forge gitlab` will now be a valid command, this exact test will fail. The spec should explicitly permit modifying Test 8 to use a truly invalid flag (e.g., `--unknown-flag`) or an invalid forge value (e.g., `--forge bitbucket`) instead.
+
+**Additional Notes on Feasibility:**
+- The 300-line limit for `lib/setup.ts` is tight but achievable (current code is ~195 lines). Combining `ghApi` and `glabApi` into a single `cliApi` function parameterized by the binary name, and sharing the error extraction as suggested in your mitigations, will be necessary to stay under budget.
+- The 400-line cap for `tests/setup.test.ts` is also generous enough for ~10 new tests (~15 lines each), assuming `mkFakeGh` is cleanly generalized to `mkFakeCli`.
+- The Codev integration constraint "Do not try to create the field [shell.architect]" is wise, and the provided `.env` parsing snippet correctly leverages a synchronous try-catch block for simplicity. Node.js `JSON.stringify` does indeed guarantee enumeration order, preserving the key order of `.codev/config.json`.

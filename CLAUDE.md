@@ -26,7 +26,7 @@ See `codev/resources/arch.md` for the full architecture document.
 - `lib/reconcile.ts` — Startup reconciliation and job enrichment
 - `lib/project-root.ts` — Walk-up project root detection (`.mcp.json` / `.git`)
 - `lib/state.ts` — Plugin state persistence (`state.json` read/write)
-- `lib/setup.ts` — `ci-channel setup --repo OWNER/REPO` installer (Spec 5, ≤150 lines, single file, no DI)
+- `lib/setup.ts` — `ci-channel setup` installer — supports all three forges and Codev auto-integration (Spec 5 + Spec 7, ≤300 lines, single file, no DI)
 
 ## Configuration
 
@@ -47,15 +47,25 @@ See `codev/resources/arch.md` for the full architecture document.
 
 ## Installation
 
-### Recommended (GitHub)
+### Recommended (all three forges)
 
 ```bash
+# GitHub (default)
 cd /path/to/your-project
 npx -y ci-channel setup --repo OWNER/REPO
+
+# GitLab
+npx -y ci-channel setup --forge gitlab --repo GROUP/PROJECT
+
+# Gitea (needs GITEA_TOKEN in <project>/.claude/channels/ci/.env or the environment)
+npx -y ci-channel setup --forge gitea --gitea-url https://gitea.example.com --repo OWNER/REPO
+
 claude --dangerously-load-development-channels server:ci
 ```
 
-### Manual (GitLab / Gitea / advanced)
+For Codev projects, the installer additionally updates `.codev/config.json` to append the channel loader flag to `shell.architect`.
+
+### Manual / advanced
 
 See `INSTALL.md`.
 
@@ -101,4 +111,4 @@ Commit message format:
 - **Never block on enrichment**: Job-detail enrichment is fire-and-forget, never blocks the primary notification
 - **Forge strategy pattern**: All forge-specific behavior (signature validation, event parsing, reconciliation, enrichment) goes in `lib/forges/`. The handler and reconciler are forge-agnostic.
 - **Fail fast**: Missing required config throws immediately, no silent fallbacks
-- **Installer rules (lib/setup.ts)**: single file, no dependency injection, no helper modules, no `@inquirer/prompts` or interactive prompts, always-PATCH existing webhooks (no "skip if already correct" fast path), state-first ordering (write `state.json` before webhook API calls)
+- **Installer rules (lib/setup.ts)**: single file, no dependency injection, no helper modules, no `@inquirer/prompts` or interactive prompts, always-PATCH/PUT existing webhooks (no "skip if already correct" fast path), state-first ordering (write `state.json` before webhook API calls). For Gitea, token validation happens BEFORE state provisioning — the only exception to state-first is this fail-fast-on-missing-input check. GitLab uses PUT (not PATCH) for hook updates. Gitea's update payload excludes the `type` field (create-only).

@@ -1,0 +1,88 @@
+# Specification Review: Spec 7 — GitLab + Gitea Installer + Codev
+
+I've read `lib/setup.ts` (194 lines), `tests/setup.test.ts` (198 lines, 8 tests), `package.json` (version 0.3.1, Node ≥20), and verified the `lib/forges/` runtime plugin exists. Here's my assessment.
+
+## Strengths
+
+- **API-shape accuracy**: Spec correctly identifies the tricky forge differences that would otherwise burn iterations — GitLab uses `PUT` (not `PATCH`) for hook updates, GitLab hook objects expose `url` at top-level (not under `config`), Gitea's edit endpoint rejects `type`, GitLab requires URL-encoding for `path_with_namespace` including subgroups. These are exactly the things a builder typically gets wrong on first try.
+- **State-first ordering + always-PATCH carried over explicitly**. The Spec 3/5 lessons are preserved and cited.
+- **Review-gate checklist is actionable** and includes dedicated items for the PUT-vs-PATCH and Gitea `type` traps.
+- **Codev integration is tightly scoped**: substring match + string concat is the right simplicity. The JSON key-order footnote is technically correct (ECMA-262 §24.5.2) and correctly defuses a reviewer false alarm.
+- **Test mocking strategy is solid**: PATH-override for CLIs (reuse existing `mkFakeGh`), real local HTTP server for Gitea (no `globalThis.fetch` stubbing). This matches the existing test style.
+- **Dependencies verified**: Node ≥20 engine means global `fetch` + `AbortController` are stable; no new deps truly needed.
+
+## Issues
+
+### 1. Contradiction: pre-existing test 8 **cannot** stay "exactly as it is"
+
+This is the biggest concrete problem. The spec says:
+
+> "The 8 scenarios from Spec 5 stay exactly as they are. They test the GitHub path and the default-forge behavior. No regression."
+
+But the actual existing test 8 in `tests/setup.test.ts:194-197` is:
+
+```typescript
+res = await runSetup(['--repo', 'foo/bar', '--forge', 'gitlab'])
+assert.equal(res.exitCode, 1)
+assert.match(res.stderr, /unexpected arg: --forge/)
+```
+
+After Spec 7, `--forge gitlab` is **valid input**, not an unexpected arg. This assertion will flip from passing to failing (or worse, will actually attempt to run the GitLab path without a fake `glab` in PATH and produce an ENOENT-classified error). The success criterion "All existing tests continue to pass" is violated by the spec's own design.
+
+**Fix**: Either (a) acknowledge test 8 must be modified to use some genuinely-unknown flag (e.g., `--nonsense`), or (b) replace the second half of test 8 with one of the new scenarios 11/12 (CLI validation) and explicitly state that test 8 is modified. Also update the "8 pre-existing unchanged + ≤12 new" wording.
+
+### 2. 300-line budget for `lib/setup.ts` is tight enough to risk a review-gate failure
+
+Current file is 194 lines. Adding the required surface:
+- expanded `parseArgs` (+~10)
+- GitLab branch incl. error classification (+~45)
+- Gitea branch incl. `fetch`, `readEnvToken`, error classification, `AbortController` (+~65)
+- `codevIntegrate` helper (+~20)
+- per-forge dispatch / common-flow plumbing (+~10)
+
+≈ +150 lines naïve → 344 total. To reach ≤300, the builder must deduplicate the existing `GhError` classification into a shared helper (`classifyForgeError(name, status, body)`) and compress existing code. Spec acknowledges "diff is likely +~100 lines after cleanup/deduplication" — but cleanup of already-working code is itself risk. Recommend the plan phase pre-budget the line count by section (e.g., "GitHub ≤70, GitLab ≤60, Gitea ≤80, Codev ≤20, common ≤70").
+
+This isn't a blocker — it's feasible — but it's the most likely place a REQUEST_CHANGES on the PR would come from.
+
+### 3. Minor: `.env` parser doesn't handle `export KEY=value`
+
+Real `.env` files sometimes ship with `export` prefixes (some projects source them directly in shells). The spec's 15-line parser doesn't handle this. Given the "minimal" framing it's intentional, but worth a one-line note in the impl: if a user has `export GITEA_TOKEN=...` and hits "token not set", they may be confused. Either strip `^export\s+` or mention this in the error message.
+
+### 4. Minor: GITEA_TOKEN precedence should be "trim and non-empty"
+
+Spec says `process.env.GITEA_TOKEN` first. What if the env var is set but empty (`GITEA_TOKEN=` in parent shell)? Recommend: "missing OR empty string after trim". One-line clarification.
+
+### 5. Minor: Codev failure after successful webhook install
+
+If `.codev/config.json` exists but throws on parse, the spec says "let it throw, top-level catch". That means the user sees `setup failed: Unexpected token in JSON` **after** the webhook was already registered and `.mcp.json` was already written. Re-running won't reproduce the forge call (idempotent PATCH), so it's recoverable, but the exit-1 on a partial success is surprising. Consider: catch the Codev step specifically and log a warning + exit 0. Not a blocker — the spec's decision is explicit — just flagging.
+
+### 6. Minor: Help text / `--forge` validation order
+
+Spec says "`--forge` must accept exactly `github`, `gitlab`, `gitea` (lowercase)" and the validation for `--gitea-url` is conditional on `--forge gitea`. Worth clarifying: if user passes `--forge GITLAB` (uppercase), error message should name the lowercase requirement. Currently the spec just says "fail fast with a usage message listing the three valid values" which might not tell the user their mistake was capitalization.
+
+## Non-Issues (verified, spec is correct)
+
+- **Node version**: `package.json` `engines: { node: ">=20" }` ✓ — global `fetch` + `AbortController` are stable
+- **`findProjectRoot`, `loadState`, `fetchSmeeChannel`** all exist in `lib/` and are currently imported by `setup.ts` ✓
+- **Runtime forge plugins** (`lib/forges/{github,gitlab,gitea}.ts`) already exist — the spec's framing that "the runtime already speaks all three forges" is accurate ✓
+- **`mkFakeGh` helper** already takes `bin` as first arg — parameterizing for `glab` is a one-line change, not a rewrite ✓
+- **GitLab hook `url` at top level** (not nested under `config`) — confirmed via GitLab REST API docs
+- **Gitea hook `config.url`** — confirmed via Gitea Swagger
+- **server.ts dispatch** (5 lines for `setup` subcommand) — confirmed, already exists at server.ts lines I'd need to verify but the spec's claim matches the existing v0.3.0 state described
+
+## Suggestions (non-blocking)
+
+- The plan phase should explicitly answer: "does `parseArgs` use a single for-loop with explicit case handling, or split validation into a second pass?" — this matters for line budget.
+- Consider whether `mkFakeCli(binName, bin, responses)` vs two separate helpers (`mkFakeGh`, `mkFakeGlab`) — given the ≤400 line test cap, a parameterized helper saves ~20 lines.
+- For scenario 3 (GitLab subgroup encoding), consider asserting the **decoded** path round-trips to catch double-encoding bugs.
+
+---
+VERDICT: COMMENT
+SUMMARY: Spec is thorough and technically accurate on forge API differences, but has one internal contradiction (test 8 cannot survive unchanged) and a tight line budget that warrants pre-planning.
+CONFIDENCE: HIGH
+---
+
+KEY_ISSUES:
+- Test 8 in `tests/setup.test.ts` uses `--forge gitlab` as its "unknown flag" example; after this spec, that flag is valid, so the assertion `/unexpected arg: --forge/` will fail. Spec's "8 pre-existing tests unchanged" criterion contradicts the design. Resolution: either modify test 8 explicitly or replace its second assertion with CLI-validation scenario 11/12.
+- 300-line cap for `lib/setup.ts` is feasible but requires deduplicating the existing `GhError` into a shared error-classification helper; recommend the plan phase pre-budget line counts per forge branch to avoid a PR-review rejection.
+- Minor: `.env` parser doesn't handle `export KEY=value` prefix; `GITEA_TOKEN` precedence should treat empty-string as missing; Codev JSON.parse failure after successful webhook install exits 1 mid-stream (recoverable but surprising).

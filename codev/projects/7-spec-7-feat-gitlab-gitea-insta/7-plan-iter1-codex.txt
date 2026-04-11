@@ -1,0 +1,21 @@
+I’ll review this against the actual repo shape as well as the embedded spec, focusing on contradictions that would cause implementation churn or review failures.I’ve got enough context now. One thing already stands out from the current tests: Phase 1 as written would make an existing test fail because `--forge gitlab` is currently used as the “unknown flag” case.**Findings**
+
+1. Phase 1 cannot pass its own test gate as written. The plan says Phase 1 does not modify [tests/setup.test.ts](/Users/mwk/Development/cluesmith/ci-channel/.builders/aspir-7-spec-7-feat-gitlab-gitea-insta/tests/setup.test.ts):194, but implementing `--forge gitlab` makes that current “unknown flag” assertion invalid. Either move the Scenario 8 `--nonsense` change into Phase 1, or relax the Phase 1 `npm test` acceptance gate until Phase 2. The cleaner fix is to modify Scenario 8 in Phase 1; it is not a new test.
+
+2. The version bump omits [package-lock.json](/Users/mwk/Development/cluesmith/ci-channel/.builders/aspir-7-spec-7-feat-gitlab-gitea-insta/package-lock.json):3 and [package-lock.json](/Users/mwk/Development/cluesmith/ci-channel/.builders/aspir-7-spec-7-feat-gitlab-gitea-insta/package-lock.json):9. The plan lists only `package.json`, but npm packages should keep the lockfile root version in sync for a release to `0.4.0`.
+
+3. The Windows testing notes are inconsistent. Codev scenarios are described as running on all platforms because they “don’t require fake CLIs,” but they reuse the GitHub setup path and current fake CLI is a POSIX shell script at [tests/setup.test.ts](/Users/mwk/Development/cluesmith/ci-channel/.builders/aspir-7-spec-7-feat-gitlab-gitea-insta/tests/setup.test.ts):24. Either skip Codev setup-path tests on `win32` too, or explicitly change `mkFakeCli` to a cross-platform fake executable.
+
+4. The plan should explicitly restore `process.env.GITEA_TOKEN` around Gitea token tests. Scenario 14 mutates/unsets it, and developer or CI environments may already have the variable set. Without restoration, tests can be order-dependent and can leak state into later cases.
+
+5. Minor spec-alignment issue: the planned `classifyForgeError` messages for GitLab `ENOENT` and `403` are not the spec’s stated messages. If review expects exact text, this will churn. Adjust the sketch to use the GitLab install URL and “project maintainer/owner permission and the 'api' scope” wording from the spec.
+
+The implementation architecture is otherwise aligned: single-file setup, no DI, no new dependencies, state-first ordering after Gitea input validation, GitLab `PUT`, Gitea separate create/update payloads, and Codev failure containment all match the spec. The task breakdown is close, but the Scenario 8 move and lockfile update need to be corrected before this is executable.
+
+---
+VERDICT: REQUEST_CHANGES
+SUMMARY: Plan is mostly aligned, but Phase 1’s test gate is internally inconsistent and the release/version + Windows/env test details need correction.
+CONFIDENCE: HIGH
+---
+
+KEY_ISSUES: Phase 1 must update Scenario 8 or cannot pass tests; package-lock version bump is missing; Codev Windows test strategy contradicts the POSIX fake CLI; GITEA_TOKEN env mutation needs restoration.
