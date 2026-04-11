@@ -1,0 +1,83 @@
+Build passes and all 191 tests pass (0 skipped, 0 failing) on Darwin. Let me verify a few remaining key items.All verification checks pass. `server.ts` is unchanged (no diff output), versions are bumped to 0.4.0 in both fields of `package-lock.json` and `package.json`.
+
+## Review Summary
+
+**Hard constraints (all pass):**
+- `lib/setup.ts`: 294 lines (≤300 ✓)
+- `tests/setup.test.ts`: 399 lines (≤400 ✓)
+- Test count: 18 (≤20 ✓)
+- Single file, no `lib/setup/` directory
+- No new dependencies
+- `server.ts` unchanged (verified)
+- `package.json` + `package-lock.json` both at 0.4.0 (both version fields)
+- `npm run build` passes
+- `npm test`: **191/191 pass, 0 failed, 0 skipped** on Darwin
+
+**Spec compliance (verified by reading `lib/setup.ts`):**
+- GitLab PUT on update (line 230), POST on create (line 234)
+- Gitea PATCH body excludes `type` (line 258); POST includes `type: 'gitea'` (line 266)
+- Gitea token check at step 3, before state provisioning (lines 151–159)
+- Gitea GET sends only `Authorization`; POST/PATCH send both `Authorization` + `Content-Type` (lines 244–245)
+- `--gitea-url` http(s) scheme validation (line 37) — was the one Codex-flagged issue, fixed in 9f9a971
+- `--forge` validation includes "(lowercase)" hint (line 26)
+- `GITEA_TOKEN` empty-string treated as missing (line 155 uses `.trim() || ...`)
+- `readEnvToken` handles `export` prefix, quoted values, comments
+- `classifyForgeError` fallback reconstructs from `{bin, args, code, stderr}` (line 100) — no `[object Object]` bug
+- `codevIntegrate` wraps its own try/catch that logs a warning and returns (lines 135–137)
+- State-first ordering preserved on all three branches
+- `.mcp.json` uses `'ci' in servers` key-presence check (line 276)
+- URL-encoded GitLab `path_with_namespace` (line 211)
+
+**Test coverage:** 10 new scenarios distributed exactly as planned (3 GitLab + 4 Gitea + 3 Codev). Strong assertions including:
+- Scenario 13 locks in "PATCH body must NOT contain type" for Gitea
+- Scenario 14 covers both missing AND empty-string `GITEA_TOKEN` (via a sub-case) + asserts no HTTP request AND no state.json written
+- Scenario 15 verifies state-first ordering on Gitea (fresh secret on disk after 401)
+- Scenario 16 asserts `builder` + `shell.shell` untouched (locks in "only `shell.architect` is mutated")
+- Scenario 8 correctly updated to `--nonsense` from `--forge gitlab`
+- `inProject` now saves/restores `GITEA_TOKEN` to prevent dev-env leak
+
+**Code quality:** The flat `if/else if/else` dispatch on `forge` is the right architecture for 3 branches — no strategy registry, no module split. `classifyForgeError` cleanly replaces the old `GhError` class and is shared between GitHub/GitLab branches. `giteaFetch` is a clean 12-line wrapper. The AbortController timeout is correctly cleared in `finally`.
+
+**Documentation:** README, INSTALL.md, CLAUDE.md, AGENTS.md, and arch.md all updated consistently, with CLAUDE.md and AGENTS.md identical where the spec requires sync. PR description is comprehensive.
+
+**Minor observations (non-blocking):**
+- Line 179's `Object.keys(existing).length === 2` check couples to `loadState`'s current shape — pre-existing from Spec 5, not a regression
+- No live smoke test was run against real GitLab/Gitea — spec explicitly marks this non-required; the follow-up items in the review doc note this
+- 294/300 and 399/400 are tight — any future feature addition will force further compression or a spec amendment to raise the caps (noted in review document's "Technical Debt" section)
+
+**Consultation trail:** Every reviewer concern at every phase was addressed:
+- Spec: 11 findings (1 Gemini, 5 Codex, 6 Claude) → all fixed
+- Plan: 10 findings (2 Gemini, 5 Codex, 5 Claude) → all fixed
+- Impl (iter 1): 1 Codex finding (`--gitea-url` scheme validation) → fixed in 9f9a971
+- Tests (iter 1): all 3 APPROVE, no changes needed
+
+The review document at `codev/reviews/7-spec-7-feat-gitlab-gitea-insta.md` is thorough (228 lines) and captures every consultation finding with dispositions. This is ready for architect hand-off.
+
+---
+VERDICT: APPROVE
+SUMMARY: Hard constraints all met (294/300, 399/400, 18/20), spec-verbatim on every checklist item, 191/191 tests pass, every reviewer concern addressed across four consultation rounds.
+CONFIDENCE: HIGH
+---
+KEY_ISSUES:
+- None
+
+PR_SUMMARY: |
+  ## Summary
+  Extends `ci-channel setup` from GitHub-only (v0.3.1) to support all three forges via `--forge github|gitlab|gitea`, and auto-wires Codev projects by appending the channel loader flag to `.codev/config.json`'s `shell.architect`. Ships as v0.4.0.
+
+  ## Key Changes
+  - **`lib/setup.ts` (194 → 294 lines, under 300-line cap)**: new GitLab branch using `glab api` (URL-encoded `path_with_namespace`, **PUT** for updates, canonical payload with `pipeline_events: true`); new Gitea branch using global `fetch()` with 10s `AbortController` timeout, `Authorization: token` header, `Content-Type` on POST/PATCH only, `type: 'gitea'` on POST but excluded from PATCH; `GITEA_TOKEN` check at step 3 **before** state provisioning (the only exception to state-first ordering); `readEnvToken` helper handles `export` prefix, quoted values, comments; `codevIntegrate` helper wrapped in local try/catch (warns and continues); `classifyForgeError` replaces `GhError` class and is shared between GitHub/GitLab branches.
+  - **`tests/setup.test.ts` (198 → 399 lines, 8 → 18 tests)**: Scenario 8 rewritten to use `--nonsense`; 10 new scenarios covering GitLab (happy path, idempotent PUT, subgroup encoding), Gitea (happy path, idempotent PATCH without `type`, missing/empty token short-circuit, 401 state-first), Codev (append, skip-if-present, no-op-when-absent). `mkFakeGh` → `mkFakeCli` generalization, new `withGiteaServer` helper, `inProject` extended to save/restore `GITEA_TOKEN`.
+  - **Docs**: README, INSTALL.md, CLAUDE.md, AGENTS.md, `codev/resources/arch.md` all updated with multi-forge installation examples and critical-patterns entries for the GitLab PUT / Gitea `type` / Gitea token-before-state rules.
+  - **Version**: `package.json` and both `package-lock.json` version fields bumped 0.3.1 → 0.4.0.
+
+  ## Test Plan
+  - [x] `npm run build` passes
+  - [x] `npm test` passes 191/191 (baseline 181 + 10 new setup scenarios), 0 flaky, 0 skipped on Darwin
+  - [x] `wc -l lib/setup.ts` = 294 (≤300)
+  - [x] `wc -l tests/setup.test.ts` = 399 (≤400)
+  - [x] 18 tests in `setup.test.ts` (≤20)
+  - [x] `git diff server.ts` returns empty
+  - [x] No new dependencies; no `lib/setup/` directory; no interactive prompts
+  - [x] GitLab uses PUT (line 230); Gitea PATCH body excludes `type` (line 258)
+  - [ ] Manual smoke test against real GitLab + Gitea instances (follow-up, not blocking)
