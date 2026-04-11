@@ -12,9 +12,11 @@ Add a `ci-channel remove` subcommand to the single-file `lib/setup.ts` installer
 
 **Per the spec's explicit rule**, code, tests, and docs updates (README, INSTALL, CLAUDE, AGENTS) land in two porch phases but a single PR. The phase split mirrors Spec 7: `impl` (implementation + docs + version bump) and `tests` (new remove test scenarios). Porch requires ≥2 phases.
 
-**Phase 1 (`impl`)**: Extend `lib/setup.ts` with a `remove()` function, the `codevRevert` helper, a merged `parseCommandArgs` (replacing the duplicated parseArgs path), and the 404-on-DELETE soft-handling logic. Update `server.ts` dispatch to recognize `remove`. Bump version to 0.5.0. Also update user-facing docs. Runs the existing test suite to catch regressions. **No new test scenarios in Phase 1.**
+**Phase 1 (`impl`)**: Extend `lib/setup.ts` with a `remove()` function, inline Codev revert logic, a merged `parseCommandArgs` replacing `parseArgs`, and a **nested `cliDelete` helper** that shares list-match-delete-with-404-soft logic across GitHub and GitLab. Gitea DELETE uses direct `fetch()` to distinguish list-404 (hard) from delete-404 (soft). Update `server.ts` dispatch to recognize `remove`. Bump version to 0.5.0. Update user-facing docs. Runs the existing test suite to catch regressions. **No new test scenarios in Phase 1.**
 
-**Phase 2 (`tests`)**: Add 9 mandatory scenarios (R1–R9) to `tests/setup.test.ts` covering GitHub (3 + 1 race), GitLab (1), Gitea (2), Codev (1), and the precondition fail-fast case (1). The fake `gh`/`glab` CLI helper is extended to recognize `DELETE` responses. The Gitea HTTP server helper is extended to handle `DELETE`. Target: 9 mandatory tests; R10 is stretch.
+**Phase 2 (`tests`)**: Add 10 mandatory scenarios (R1–R10) to `tests/setup.test.ts` covering GitHub happy path, GitHub no-match, customized `.mcp.json`, missing `state.json`, GitLab happy path, Gitea happy path, Gitea missing token, Codev revert, delete-404 race, list-404 hard fail, and malformed-state (folded into R4). Target: 10 new tests, **28 total** (at the cap).
+
+**Line-cap commitment**: the spec's pre-budget for `lib/setup.ts` projects ~420 lines pessimistic. Realistic accurate estimate after honest counting: ~425 lines with naive implementation. Phase 1 commits upfront to **five specific tightening levers** (see "Tightening commitments" in Phase 1). Projected landing: **395–405 lines**. This is genuinely tight and Phase 1 has a hard escalation gate: `wc -l lib/setup.ts > 400` at any intermediate build blocks the phase and requires notifying the architect before proceeding.
 
 Both phases land in a single PR. The number of git commits is porch bookkeeping; squash-merge at merge time if the reviewer prefers a single commit.
 
@@ -63,15 +65,61 @@ Copied from `codev/specs/8-spec-8-feat-ci-channel-remove-.md`:
 #### Objective
 
 Extend `lib/setup.ts` with:
-- A merged `parseCommandArgs(argv, command)` function that replaces the existing `parseArgs` (saves ~10–12 lines vs. duplicating a `parseRemoveArgs`)
+- A merged `parseCommandArgs(argv, command)` function that replaces the existing `parseArgs` (+2 lines over the current 24-line function)
 - A `remove()` exported function with three forge branches (GitHub, GitLab, Gitea) sharing helpers with `setup()`
-- A `codevRevert` helper that strips the loader flag from `.codev/config.json`
+- A **nested `cliDelete` helper inside `remove()`** that de-duplicates the GitHub + GitLab list-match-delete-with-404-soft logic (saves ~22 lines vs. inlining both branches)
+- **Inline Codev revert logic inside `remove()`** (wrapped in a local try/catch) rather than a separate top-level `codevRevert` helper — saves ~7 lines vs. a separate function
 - A local try/catch-based approach to 404-on-DELETE soft handling (Option B from the spec — no change to `classifyForgeError` signature)
 - Direct `readFileSync` + `JSON.parse` precondition check for `state.json` (do NOT use `loadState`, which swallows errors)
+- Gitea DELETE uses direct `fetch()` with manual status handling (bypasses `giteaFetch` which throws on 404)
 
 Extend `server.ts` dispatch to recognize both `setup` and `remove`. Dynamic import of `lib/setup.js` must still only happen when the user invoked a subcommand.
 
 Final `lib/setup.ts` must be ≤400 lines. Update user-facing docs (README, INSTALL, CLAUDE, AGENTS) and bump `package.json` + `package-lock.json` version to `0.5.0`.
+
+#### Tightening commitments (upfront, not contingent)
+
+The naive implementation counts to ~425 lines. To land at ≤400, Phase 1 commits to **all five** of these tightening levers from the start. These are not "if overage persists" fallbacks.
+
+1. **Nested `cliDelete` helper inside `remove()`** (~20 lines) — shared by GitHub and GitLab DELETE paths. Call sites are 1 line each. Saves ~22 lines vs. inlining both branches (22+22=44 → 20+2=22).
+2. **Inline Codev revert into `remove()`** (~18 lines inside a local try/catch), NOT a separate `codevRevert` helper. Saves ~7 lines vs. a top-level helper (function signature, closing brace, call site, return statements add up).
+3. **Compact `.mcp.json` revert block** (~18 lines) — use a single `if/else` chain instead of nested guards. Compact canonical check using `&&` chaining inside the same `if`.
+4. **Compact state.json precondition** (~12 lines) — one outer `if (!existsSync)` + one try/catch for JSON.parse + one smeeUrl check. No intermediate variables beyond `state` and `smeeUrl`.
+5. **Terse log strings** — reuse setup's existing log line shapes. Don't add verbose explanatory messages. Skip blank separator lines between sections inside `remove()` (setup has a few; remove should omit them).
+
+**Baseline expected impact (with all five levers applied):**
+
+| Change | Lines | Running Total |
+|--------|-------|---------------|
+| Current `lib/setup.ts` | — | 300 |
+| `parseCommandArgs` rename/extension (+2) | +2 | 302 |
+| `unlinkSync` import (+1) | +1 | 303 |
+| `remove()` prelude + args + findProjectRoot + logs (~7) | +7 | 310 |
+| state.json precondition (Lever 4, ~12) | +12 | 322 |
+| Gitea token check (~8) | +8 | 330 |
+| Nested `cliDelete` helper (Lever 1, ~20) | +20 | 350 |
+| GitHub + GitLab branch call sites (~4) | +4 | 354 |
+| Gitea DELETE branch inline (~22, with direct fetch) | +22 | 376 |
+| state.json unlink (~5) | +5 | 381 |
+| `.mcp.json` revert (Lever 3, ~18) | +18 | 399 |
+| Inline Codev revert (Lever 2, ~18) | +18 | 417 |
+| Final stdout + outer catch (~5) | +5 | 422 |
+
+Naive projection: **~422**. Still over. **Additional compression required**:
+
+6. **Compress Gitea branch**: reuse `giteaFetch` for the LIST call (existing behavior, ~2 lines in `remove()`), and inline DELETE fetch in ~14 lines instead of 22. Drop the separate `authHdrs`/`jsonHdrs` vars and inline the headers at the call site. **Saves ~8 lines.** New total: **414**.
+
+7. **Compress `.mcp.json` revert** further by building `expectedArgs` inline inside the `JSON.stringify` check, and using a single compound expression for the canonical-check. **Saves ~5 lines.** New total: **409**.
+
+8. **Drop the "Forge:        ${forge}" log line**: it duplicates the `--forge` flag the user just typed. **Saves 1 line.** New total: **408**.
+
+9. **Inline state.json precondition's error message variables**: no `statePath` reuse inside the error text, just `${statePath}` literal. **Saves ~2 lines** (removing intermediate error variable constructions). New total: **406**.
+
+10. **Reduce outer catch to a single line**: `} catch (err) { console.error(...); process.exit(1); }` on one physical line (acceptable in TypeScript). **Saves ~2 lines.** New total: **404**.
+
+Realistic landing zone after all 10 levers: **400–410**, with **400** as the hard target.
+
+**Phase 1 escalation gate**: after the implementation builds and compiles, `wc -l lib/setup.ts` must return ≤400. If it returns 401–410, apply additional compression (tighten variable names, shorten log strings, drop blank lines). If it returns >410, Phase 1 stops and the builder notifies the architect via `afx send architect "Project 8: lib/setup.ts landed at N lines, exceeds 400-line cap after all tightening levers. Requesting cap increase or scope reduction."`. The builder does NOT silently exceed the cap.
 
 #### Files
 
@@ -126,40 +174,45 @@ The existing `setup()` body calls `parseCommandArgs(argv, 'setup')` and `remove(
 
 **Net line impact**: the current `parseArgs` is 24 lines. The new `parseCommandArgs` is ~26 lines (adds the `command` parameter and the usage string variable). Net +2 lines in this section, but eliminates the need for a separate 20-line `parseRemoveArgs`. **Total savings**: ~18 lines vs. duplication.
 
-**2. `codevRevert` helper (~25 lines)**
+**2. Codev revert is inlined into `remove()` (NOT a separate helper)**
+
+The iter1 plan proposed a top-level `codevRevert` helper mirroring `codevIntegrate` (~25 lines). Claude's iter1 review flagged that the line cap is tight and a top-level helper wastes lines on function boilerplate. The revised plan **inlines the revert logic directly in `remove()`** inside a local try/catch (Lever 2 from "Tightening commitments"), saving ~7 lines. The logic is identical to what `codevRevert` would have done:
 
 ```typescript
-function codevRevert(root: string): void {
-  const codevPath = join(root, '.codev', 'config.json')
-  if (!existsSync(codevPath)) return
+// At the end of remove(), right before the final stdout
+const codevPath = join(root, '.codev', 'config.json')
+if (existsSync(codevPath)) {
   try {
     // biome-ignore lint/suspicious/noExplicitAny: user-owned JSON
     const config: any = JSON.parse(readFileSync(codevPath, 'utf-8'))
     const architect = config?.shell?.architect
+    const needle = ` ${CODEV_FLAG}`
     if (typeof architect !== 'string' || architect.length === 0) {
       log(`.codev/config.json has no shell.architect — skipping (unexpected Codev shape)`)
-      return
-    }
-    const needle = ` ${CODEV_FLAG}`
-    if (!architect.includes(needle)) {
+    } else if (!architect.includes(needle)) {
       log(`.codev/config.json does not load ci channel — nothing to revert`)
-      return
+    } else {
+      config.shell.architect = architect.replace(needle, '')
+      writeFileSync(codevPath, JSON.stringify(config, null, 2) + '\n')
+      log(`Reverted .codev/config.json: architect session will no longer load ci channel`)
     }
-    config.shell.architect = architect.replace(needle, '')
-    writeFileSync(codevPath, JSON.stringify(config, null, 2) + '\n')
-    log(`Reverted .codev/config.json: architect session will no longer load ci channel`)
   } catch (err) {
     log(`warning: Codev revert failed: ${(err as Error).message}. Other cleanup succeeded; edit .codev/config.json manually to remove ${CODEV_FLAG} from shell.architect.`)
   }
 }
 ```
 
-Mirror of `codevIntegrate` with three changes:
-- `includes(needle)` checks for ` ${CODEV_FLAG}` (with leading space), matching the exact string that `codevIntegrate` wrote. This automatically handles the edge case where the flag is at the start of the string (no leading space → no match → log "nothing to revert").
-- `replace(needle, '')` strips the flag and its single leading space (no whitespace collapse elsewhere).
-- Log lines say "Reverted" / "nothing to revert" / "does not load ci channel" per the spec.
+**~18 lines inlined.** The local try/catch preserves the "log and continue on failure" contract from the spec — a malformed `.codev/config.json` logs a warning and `remove` proceeds to the final "Done" message.
 
-**3. `remove()` body (~90 lines — tight, but fits with the parseCommandArgs merge savings)**
+**Implementation rules**:
+- `needle = ` ${CODEV_FLAG}`` (with leading space) matches the exact string `codevIntegrate` wrote. Substring-match-with-leading-space handles the edge case where the flag is at the start of the string (no match → "nothing to revert" path, which is acceptable).
+- `replace(needle, '')` strips the flag and its single leading space (no whitespace collapse elsewhere).
+- Log lines: "Reverted" / "nothing to revert" / "no shell.architect" — verbatim from spec.
+- Use an `if/else if/else` chain instead of early returns to avoid duplicating the `try { ... } catch { ... }` boilerplate.
+
+**3. `remove()` body (~108 lines with all tightening levers applied; 127 naive)**
+
+This sketch is the canonical structure Phase 1 commits to. Comments in parentheses show approximate line counts per block.
 
 ```typescript
 export async function remove(argv: string[]): Promise<void> {
@@ -296,42 +349,59 @@ export async function remove(argv: string[]): Promise<void> {
 }
 ```
 
-**Important refinement on error classification** (addresses a subtle bug in the sketch above): the outer try/catch structure for the GitHub branch is awkward because `classifyForgeError` would be called on both list errors AND the re-raised delete errors. Cleaner structure:
+**Shared `cliDelete` nested helper (~20 lines, Lever 1)**
+
+The GitHub and GitLab branches have the same list-match-delete-with-404-soft shape — only the CLI binary, list path, match key, and delete path differ. Nest a helper inside `remove()` (not at the top of the file) to share the structure:
 
 ```typescript
-// Clean pattern — two nested try/catch blocks
-if (forge === 'github') {
+async function cliDelete(
+  bin: 'gh' | 'glab',
+  listArgs: string[],
+  matchFn: (h: any) => boolean,
+  delPath: (id: number) => string,
+): Promise<void> {
+  log(`Listing existing hooks for ${bin} ${repo}...`)
   let hooks: unknown[]
   try {
-    const listOut = await cliApi('gh', ['api', '--paginate', '--slurp', `repos/${repo}/hooks`], null)
-    const pages = JSON.parse(listOut)
-    hooks = Array.isArray(pages) ? pages.flat() : []
-  } catch (err) {
-    throw classifyForgeError('gh', err, repo)
-  }
+    const listOut = await cliApi(bin, listArgs, null)
+    const parsed = JSON.parse(listOut)
+    hooks = bin === 'gh' ? (Array.isArray(parsed) ? parsed.flat() : []) : (Array.isArray(parsed) ? parsed : [])
+  } catch (err) { throw classifyForgeError(bin, err, repo) }
   // biome-ignore lint/suspicious/noExplicitAny: untyped JSON
-  const existingHook = hooks.find((h: any) => h?.config?.url === smeeUrl)
-  if (!existingHook) {
-    log(`no matching webhook found on github; skipping webhook delete`)
-  } else {
-    log(`Found webhook ${(existingHook as any).id} on ${repo} — deleting...`)
-    try {
-      await cliApi('gh', ['api', '--method', 'DELETE', `repos/${repo}/hooks/${(existingHook as any).id}`], null)
-      log(`Deleted webhook ${(existingHook as any).id}`)
-    } catch (delErr) {
-      // biome-ignore lint/suspicious/noExplicitAny: err is opaque
-      const stderr = String((delErr as any)?.stderr ?? '')
-      if (/HTTP 404|Not Found/i.test(stderr)) {
-        log(`webhook ${(existingHook as any).id} already deleted on github; continuing`)
-      } else {
-        throw classifyForgeError('gh', delErr, repo)
-      }
-    }
+  const hit = hooks.find(matchFn) as any
+  if (!hit) { log(`no matching webhook found on ${bin === 'gh' ? 'github' : 'gitlab'}; skipping webhook delete`); return }
+  log(`Found webhook ${hit.id} on ${repo} — deleting...`)
+  try {
+    await cliApi(bin, ['api', '--method', 'DELETE', delPath(hit.id)], null)
+    log(`Deleted webhook ${hit.id}`)
+  } catch (delErr) {
+    // biome-ignore lint/suspicious/noExplicitAny: err is opaque
+    if (/HTTP 404|Not Found/i.test(String((delErr as any)?.stderr ?? ''))) log(`webhook ${hit.id} already deleted; continuing`)
+    else throw classifyForgeError(bin, delErr, repo)
   }
 }
 ```
 
-Two nested try/catch blocks: one for list (catches all list errors), one for delete (soft-handles 404, hard-fails on everything else). Cleaner than a single outer try. **Plan phase commitment**: use the two-block pattern.
+**~20 lines.** Closure captures `repo` and (for match functions) `smeeUrl` from the enclosing scope. The two outer try/catch blocks disambiguate LIST errors (hard fail via `classifyForgeError`) from DELETE 404 (soft fail, log and continue).
+
+**Call sites (GitHub + GitLab = 4 lines total)**:
+
+```typescript
+if (forge === 'github') {
+  await cliDelete('gh', ['api', '--paginate', '--slurp', `repos/${repo}/hooks`],
+    (h: any) => h?.config?.url === smeeUrl, (id) => `repos/${repo}/hooks/${id}`)
+} else if (forge === 'gitlab') {
+  const enc = encodeURIComponent(repo)
+  await cliDelete('glab', ['api', `projects/${enc}/hooks`],
+    (h: any) => h?.url === smeeUrl, (id) => `projects/${enc}/hooks/${id}`)
+} else {
+  // gitea — inline, see below
+}
+```
+
+**Savings**: ~44 inline lines (22 GitHub + 22 GitLab) reduced to ~28 lines (20 helper + 4 call sites + 4 scaffolding). **Net savings: ~16 lines**, not ~22 as I projected in iter1 — but still the best available tightening lever for remove()'s forge branches.
+
+**Gitea DELETE branch (~22 lines inline)**: Gitea uses `fetch()` for the DELETE path specifically (to distinguish list-404 hard from delete-404 soft) but reuses the existing `giteaFetch` for the LIST call (where 404 is a hard fail — this is the existing behavior and matches the spec's 404-handling rule). Only the DELETE uses direct `fetch` with manual status handling.
 
 **4. GitLab branch inside `remove()` (~25 lines)**
 
@@ -416,24 +486,24 @@ if (process.argv[2] === "setup" || process.argv[2] === "remove") {
 
 #### Acceptance Criteria
 
-- [ ] `wc -l lib/setup.ts` reports ≤ 400
+- [ ] `wc -l lib/setup.ts` reports ≤ 400 (if 401–410, tighten further; if >410, escalate — see Tightening commitments)
 - [ ] `wc -l server.ts` reports within [current - 0, current + 3] (dispatch extension only, no other changes)
 - [ ] `lib/setup.ts` compiles (`npm run build` succeeds)
 - [ ] `grep -E 'lib/remove\.ts|lib/setup/|ForgeUninstaller|FORGE_UNINSTALLERS' lib/` returns nothing
-- [ ] `grep -c '^function ' lib/setup.ts` is exactly one more than the current count (the new `codevRevert`)
 - [ ] `grep -c '^export async function ' lib/setup.ts` is 2 (setup + remove)
 - [ ] `lib/setup.ts` calls `loadState` only from inside `setup()`, never from `remove()` — verified by inspection (the spec requires direct `readFileSync` + `JSON.parse` for the precondition check)
-- [ ] `npm test` passes with the baseline 18 tests unchanged (no new test scenarios, no modified assertions, Phase 1 produces zero test diff beyond what might be incidentally touched by running the suite)
+- [ ] `npm test` passes. The repo currently reports `tests 191` / `pass 191` across 11 test files (18 of which are in `tests/setup.test.ts`). Phase 1 makes no test edits, so the count must still be exactly `191` after Phase 1. If the baseline is not 191 at Phase 1 start, record the actual baseline from `npm test 2>&1 | tail -5` and compare to it instead.
 - [ ] `server.ts` dispatch is ≤ 8 lines and still uses `await import('./lib/setup.js')` dynamically
 - [ ] `package.json` version is `0.5.0`
-- [ ] `package-lock.json` version is `0.5.0` in both places
+- [ ] `package-lock.json` version is `0.5.0` in **both** places (verify with `grep -c '"version": "0.5.0"' package-lock.json` reports exactly 2)
 - [ ] README / INSTALL / CLAUDE / AGENTS mention `ci-channel remove`
 
 #### Test Approach (Phase 1)
 
-- Phase 1 runs the **existing** 18 tests as a regression gate. **No new scenarios, no modified assertions.**
-- If `npm test` shows anything other than `tests 18`/`pass 18`, Phase 1 is blocked until fixed.
-- Manual smoke test (not automated): `node dist/server.js remove --repo owner/repo` in a non-project directory should print `No project root found ...`. This is informational, not a Phase 1 gate.
+- Phase 1 runs the **existing** full test suite (`npm test`, currently `tests 191`) as a regression gate. **No new scenarios, no modified assertions.**
+- **First action of Phase 1**: run `npm test 2>&1 | tail -5` to record the actual baseline count. Copy this count into the phase commit message.
+- If `npm test` shows any regression from the recorded baseline (fewer passes, any fails), Phase 1 is blocked until fixed.
+- Manual smoke test (not automated, not a Phase 1 gate): build with `npm run build`, then run `node dist/server.js remove --repo owner/repo` in a non-project directory and confirm it prints `No project root found ...`. Informational only.
 
 ---
 
@@ -443,70 +513,94 @@ if (process.argv[2] === "setup" || process.argv[2] === "remove") {
 
 #### Objective
 
-Add **9 mandatory scenarios** (R1–R9) to `tests/setup.test.ts` covering the remove command paths. Extend the existing fake-CLI and HTTP-server helpers to handle `DELETE` responses.
+Add **10 mandatory scenarios** (R1–R10) to `tests/setup.test.ts` covering the remove command paths. Reuse existing test scaffolding (`mkFakeCli`, `withGiteaServer`, `inProject`, `seedState`) — do NOT extend `mkFakeCli` (it's already method-agnostic).
 
-Final `tests/setup.test.ts` must be ≤600 lines and contain ≤28 tests total. Target: 9 new tests, 27 total (18 existing + 9 new).
+Final `tests/setup.test.ts` must be ≤600 lines and contain ≤28 tests total. Target: 10 new tests, **28 total** (18 existing + 10 new).
 
 #### Files
 
-- **Modify**: `tests/setup.test.ts` — add 9 new scenarios + a small `runRemove` helper + extend fake-CLI response handling for DELETE + extend the Gitea server helper for DELETE
+- **Modify**: `tests/setup.test.ts` — add 10 new scenarios + a small `runRemove` helper (5 lines, in-process, mirrors existing `runSetup` at lines 64–76)
 
-No other files touched. **No new test files** (e.g., no `tests/remove.test.ts`).
+No other files touched. **No new test files** (e.g., no `tests/remove.test.ts`). **No modifications to `mkFakeCli` or `withGiteaServer`.**
 
-#### Implementation Sketch
+#### Factual corrections about the existing test scaffolding
 
-**Helper extensions (~20 lines total)**
+The plan-iter1 Claude and Codex reviews caught two factual errors in the iter1 plan draft that are now fixed:
 
-1. **`runRemove(argv, env)` helper** (~5 lines) — mirror of the existing `runSetup`, calls the `dist/server.js` binary with `remove` as the first arg. Alternatively, reuse `runSetup` with a `command: 'setup' | 'remove'` parameter. Plan phase picks whichever fits tighter — probably the two helpers share ~80% of their body so a `runCli(command, argv, env)` variant saves ~5 lines.
+1. **`runSetup` is in-process, not dist-based.** The existing helper (tests/setup.test.ts:64–76) imports `setup` from `../lib/setup.js` at the top of the file (line 8) and invokes it directly in-process, stubbing `process.exit` and capturing `process.stderr.write`. **`runRemove` must mirror this exact pattern** — import `remove` alongside `setup` at line 8, and build a `runRemove` helper that's a 5-line copy of `runSetup` but calls `remove(argv)` instead. No `dist/server.js` spawning, no build step dependency.
 
-2. **Extend `mkFakeCli` (or equivalent)** to recognize `DELETE` in the response map. Current (Spec 7) fake CLI probably has a `POST`/`PATCH`/`PUT`/`GET` branch structure; add a `DELETE` branch that returns the configured response (or exits 1 with a configurable stderr for the 404 race test). ~5 lines.
+2. **`mkFakeCli` is counter-based, not method-dispatched.** The helper (tests/setup.test.ts:19–36) writes responses indexed by call count (`${name}.out.${n}`) and reads them by an incrementing counter at script invocation time. It has no HTTP-method dispatch — it just returns the Nth response on the Nth call, regardless of what args the CLI was invoked with. **No helper extension is needed for DELETE support.** Tests just seed `responses[0]` as the list response and `responses[1]` as the DELETE response, in that order. The fake CLI returns them in sequence.
 
-3. **Extend `withGiteaServer`** to handle `DELETE` requests. The existing handler is a `(req, res) => void` function; the new test fixtures just register `req.method === 'DELETE'` paths. No helper change needed if the handler is already general-purpose. If it isn't, ~5 lines to generalize.
+3. **`withGiteaServer` is already method-agnostic.** The handler signature `(req, res) => void` takes full control of request routing. Gitea tests register `req.method === 'DELETE'` branches in their handler closure. No helper change needed.
 
-**Scenarios R1–R9 (details from spec; implementation notes here)**
+**Net helper changes**: zero. Add only the 5-line `runRemove` helper.
+
+#### Helper extension (5 lines)
+
+```typescript
+// Add at tests/setup.test.ts line 8 (alongside the existing import)
+import { setup, remove } from '../lib/setup.js'
+
+// Add a runRemove helper right after runSetup (tests/setup.test.ts line 76)
+async function runRemove(argv: string[]): Promise<Result> {
+  return runCommand(remove, argv)
+}
+```
+
+Even shorter: factor `runSetup` and `runRemove` through a shared `runCommand(fn, argv)` that both delegate to. `runSetup` becomes 1 line (`return runCommand(setup, argv)`), `runRemove` is 1 line. **Saves ~8 lines total across the two helpers.**
+
+**Scenarios R1–R10 (details from spec; implementation notes here)**
 
 | ID | Lines | Notes |
 |----|-------|-------|
-| R1 | ~30 | GitHub happy path. Use nested-array list response `[[{id:42, config:{url:smeeUrl}}]]` to match `--paginate --slurp` shape. Fake DELETE returns `{}`. |
-| R2 | ~20 | GitHub no matching webhook. List returns `[[]]`. No DELETE recorded. |
-| R3 | ~25 | GitHub customized .mcp.json. Seed ci entry with extra `env` key, assert it's untouched after remove. Webhook still deleted. |
-| R4 | ~15 | No state.json. Fail fast, exit 1. No fake-gh call. |
-| R5 | ~25 | GitLab happy path. Fake glab with list + DELETE responses. Assert path encoding `group%2Fproject`. |
-| R6 | ~30 | Gitea happy path. HTTP server with GET + DELETE handlers. Assert `Authorization: token fake-token` and DELETE path. |
-| R7 | ~20 | Gitea missing token. Assert state.json still exists, no HTTP request received. |
-| R8 | ~25 | Codev revert. Seed config.json with loader flag, assert it's stripped after. |
-| R9 | ~25 | 404-during-DELETE race. Fake gh DELETE returns exit 1 with `HTTP 404: Not Found` in stderr. Assert "already deleted" log and exit 0. |
+| R1 | ~32 | GitHub happy path. List response: `[[{id:42, config:{url:smeeUrl}}]]` (nested array — matches setup's `gh api --paginate --slurp` shape). Fake DELETE returns `{}` on success. **Also folds in the "remove-twice" assertion**: after the first `runRemove` succeeds, a second `runRemove` call asserts exit code 1 and stderr contains `no ci-channel install detected`. This addresses Codex issue 2 ("remove twice not tested") without a separate test. ~4 extra lines for the second assertion. |
+| R2 | ~18 | GitHub no matching webhook. List returns `[[]]`. No DELETE recorded. Assert `no matching webhook found`, exit 0, state.json deleted, .mcp.json cleaned. |
+| R3 | ~24 | GitHub customized .mcp.json. Seed ci entry with extra `env` key. **Assertion string**: stderr contains `does not match the canonical shape for --forge github` (matches the actual log line from `remove()` — NOT the earlier "is customized — leaving alone" phrasing from iter1, which was a drafting error). Assert ci entry byte-equal after remove, webhook still deleted, exit 0. |
+| R4 | ~18 | **Two sub-assertions folded into one test**: (a) no state.json at all → fail fast with `no ci-channel install detected`; (b) state.json present but missing `smeeUrl` → fail fast with `missing a 'smeeUrl' field`. Both assert exit code 1, no fake-gh call recorded, .mcp.json untouched, state.json untouched (in case b). This covers spec criterion for R10 (malformed/missing-smeeUrl) by folding R10 into R4. **R10 is not a separate test.** |
+| R5 | ~24 | GitLab happy path. Fake glab with list response `[{ id: 77, url: smeeUrl }]` (top-level `url`, no `config` nesting, no pagination). DELETE returns `{}`. Assert `glab api projects/group%2Fproject/hooks` for list and `glab api --method DELETE projects/group%2Fproject/hooks/77` for delete. |
+| R6 | ~30 | Gitea happy path. HTTP server with GET + DELETE handlers (same `withGiteaServer` helper). Assert `Authorization: token fake-token` on both requests, DELETE path `/api/v1/repos/owner/repo/hooks/99`. |
+| R7 | ~20 | Gitea missing token. Assert exit 1, stderr `GITEA_TOKEN not set`, **state.json still exists** (precondition fail-fast before local mutation), **no HTTP request received by the server**. |
+| R8 | ~24 | Codev revert. Seed `.codev/config.json` with `{ shell: { architect: 'claude --dangerously-skip-permissions --dangerously-load-development-channels server:ci' } }`. After remove, assert architect is `'claude --dangerously-skip-permissions'` (flag + leading space stripped). Stderr contains `Reverted .codev/config.json`. |
+| R9 | ~22 | 404-during-DELETE race. Fake gh returns hook on list, DELETE exits 1 with stderr `HTTP 404: Not Found`. Assert `already deleted` in stderr, state.json deleted, .mcp.json cleaned, exit 0. |
+| R10 | ~20 | **LIST-404 hard failure** (addresses Codex issue 3). Fake gh returns exit 1 with stderr `HTTP 404: Not Found` on the LIST call (before any DELETE). Assert exit 1, stderr contains `Could not find repo` (the existing `classifyForgeError` message), **state.json still exists**, **.mcp.json untouched**. This is distinct from R9 (which tests 404 on DELETE); R10 tests 404 on LIST. R10 is mandatory. |
 
-Total new test body: ~215 lines. Plus helper extensions ~20 lines, helpers shared with existing tests ~0 overhead. **Estimated final file size**: 399 (current) + 20 (helpers) + 215 (scenarios) = **~634 lines**.
+Total new test body: ~232 lines. Plus helper extension (runRemove + shared runCommand refactor): ~0 net (the refactor saves lines by deduplicating the two helpers).
 
-**Over the 600-line cap by ~34 lines.** Tightening options for Phase 2:
-1. Share the `runSetup`/`runRemove` helpers (save ~10 lines).
-2. Extract per-scenario state.json seeding into a helper (`seedState(tmp, overrides)`) (save ~10 lines).
-3. Extract per-scenario canonical .mcp.json seeding (`seedMcp(tmp, forge)`) (save ~10 lines).
-4. Collapse R4 into a one-liner assertion inside R1's setup (save ~5 lines).
-5. Drop R3 "extra keys" variant to just "changed command" (save ~5 lines).
+**Estimated final file size**: 399 (current) + 232 (scenarios) - 3 (helper refactor savings) + 5 (imports + minor changes) = **~633 lines**.
 
-Applying (1) + (2) + (3) lands at ~604 lines. Plus (4) = ~599 lines. **Plan phase commitment**: apply tightening options 1, 2, 3, and 4. If the final file is still over 600, drop R10 (which is optional and not counted in this estimate anyway — R10 was already excluded above).
+**Over the 600-line cap by ~33 lines.** Phase 2 commits upfront to **all four** tightening strategies:
 
-If after all tightening the file is still over 600, the Phase 2 acceptance check fails and the builder must escalate to the architect. **Do NOT silently raise the cap.**
+1. **Shared `runCommand(fn, argv)` helper** backing both `runSetup` and `runRemove` (saves ~8 lines vs. two full copies).
+2. **Compact canonical .mcp.json seeding** via a local `makeMcp(forge)` helper (~5 lines) shared by R1, R2, R3, R4, R9 (saves ~15 lines of duplicated seeding).
+3. **Compact state.json seeding** — already available via existing `seedState` helper. Use it in all tests. No additional savings (already factored).
+4. **Tight assertion style** — use `assert.match(stderr, /.../)` with combined regex patterns instead of multiple `assert.ok` checks. Saves ~1 line per test × 10 = ~10 lines.
+
+Applied: 633 - 8 - 15 - 10 = **~600 lines** (right at the cap).
+
+**Phase 2 escalation gate**: after all scenarios are added and `npm test` passes, `wc -l tests/setup.test.ts` must return ≤600. If 601–620, apply further compression (inline small assertions, drop blank lines). If >620, Phase 2 stops and the builder notifies the architect. **Do NOT silently raise the cap.**
 
 #### Acceptance Criteria
 
 - [ ] `wc -l tests/setup.test.ts` reports ≤ 600
-- [ ] Test count: `grep -cE "^  (it|test)\\(" tests/setup.test.ts` or whatever the existing pattern is, reports ≤ 28 (target: 27)
-- [ ] All 9 mandatory scenarios R1–R9 are present (identified by a comment or test name matching `/remove.*[Rr]emove/` etc.)
-- [ ] `npm test` passes with 27 tests (18 existing + 9 new)
+- [ ] Test count in `tests/setup.test.ts` specifically is 28 (`grep -c "^\s*test(" tests/setup.test.ts` reports 28, being 18 existing + 10 new remove scenarios)
+- [ ] All 10 mandatory scenarios R1–R10 are present, identified by `test('remove ...', ...)` naming
+- [ ] `npm test` passes with the updated total test count. The repo currently reports `tests 191` / `pass 191` (11 test files combined; 18 from setup.test.ts). After Phase 2, total should be `tests 201` / `pass 201` (18 + 10 = 28 in setup.test.ts, other files unchanged). Record the exact baseline count from `npm test 2>&1 | tail -5` at the start of Phase 2 before making any edits — if the baseline is not 191, adjust the target accordingly.
 - [ ] No flaky tests introduced (run `npm test` three times in a row; all three passes must show the same count and all green)
-- [ ] No new test files (`ls tests/*.test.ts` still returns only `setup.test.ts` and whatever existed before)
+- [ ] No new test files (`ls tests/*.test.ts` unchanged)
+- [ ] `mkFakeCli`, `withGiteaServer`, `runSetup` are unchanged — no extensions or modifications to existing helpers
 
 #### Test Approach (Phase 2)
 
 - Run `npm test` after each scenario is added, not all at once. Catch mistakes early.
+- `runRemove` is in-process (mirrors `runSetup` at tests/setup.test.ts:64–76) — it does NOT spawn `dist/server.js`. Import `remove` alongside `setup` at the top of the test file.
+- `mkFakeCli` returns responses by call index, not by HTTP method. Seed `responses` in call order: for a test where remove lists first then deletes, `responses[0]` is the list response and `responses[1]` is the DELETE response.
+- For R4 (folds missing-state + missing-smeeUrl): write two `runRemove` calls inside the same test, one per sub-case. Both assert the same exit-code-1 and local-files-untouched pattern, with different stderr regex matches.
 - For R7 (Gitea missing token), the test MUST assert `existsSync(statePath) === true` after the failure — this is the explicit "precondition check before local mutation" guarantee from the spec.
 - For R9 (404 race), fake `gh` must return stderr containing `HTTP 404: Not Found` to match the existing `classifyForgeError` regex and the new soft-handling branch.
-- For R3 (customized .mcp.json), compare `JSON.parse` round-trip, not byte equality — the installer's canonical-JSON output may differ from the seeded file's formatting.
-- For R6 (Gitea happy path), the fake HTTP server handler should log all received requests into an array the test can assert on. Same pattern as Spec 7's `withGiteaServer` scenarios.
-- Environment variable isolation: R7 (and any test touching `GITEA_TOKEN`) must save and restore the original value in a `finally`.
+- For R10 (404-on-LIST hard fail), fake `gh` returns the same stderr but on the LIST call (responses[0]). Assert the exit code 1 and the existing `Could not find repo '...'` error message — this locks in that classifyForgeError still kicks in on LIST 404.
+- For R3 (customized .mcp.json), compare `JSON.parse` round-trip, not byte equality — the installer's canonical-JSON output may differ from the seeded file's formatting. **Assertion string must be `does not match the canonical shape for --forge github`** to match the actual log line.
+- For R6 (Gitea happy path), the `withGiteaServer` handler captures requests into an array the test can assert on (same pattern as Spec 7). The handler distinguishes GET vs DELETE via `req.method`.
+- Environment variable isolation: R7 (and any test touching `GITEA_TOKEN`) is already handled by `inProject` which saves and restores `GITEA_TOKEN` in its finally block (tests/setup.test.ts:82–92).
 
 ---
 
