@@ -456,7 +456,7 @@ describe('ci-channel setup', () => {
     })
   })
 
-  test('R4. remove without state.json OR state.json missing smeeUrl → fail fast, no mutations', { skip: WIN }, async () => {
+  test('R4. remove with missing / malformed / missing-smeeUrl state.json → fail fast, no mutations', { skip: WIN }, async () => {
     await inProject(async ({ root, bin }) => {
       // Case (a): no state.json at all
       writeFileSync(join(root, '.mcp.json'), MCP_CI_ONLY)
@@ -466,8 +466,19 @@ describe('ci-channel setup', () => {
       assert.match(res.stderr, /no ci-channel install detected/)
       assert.equal(cliCount(bin, 'gh'), 0, 'no gh call before precondition fail')
       assert.equal(readFileSync(join(root, '.mcp.json'), 'utf-8'), MCP_CI_ONLY)
-      // Case (b): state.json present but missing smeeUrl
-      const statePath = seedState(root, { webhookSecret: SECRET })
+      // Case (b): state.json present but malformed (not valid JSON)
+      const statePath = join(root, '.claude', 'channels', 'ci', 'state.json')
+      mkdirSync(join(root, '.claude', 'channels', 'ci'), { recursive: true })
+      writeFileSync(statePath, '{not valid json', { mode: 0o600 })
+      const badBefore = readFileSync(statePath, 'utf-8')
+      res = await runRemove(['--repo', 'foo/bar'])
+      assert.equal(res.exitCode, 1)
+      assert.match(res.stderr, /unreadable or malformed/)
+      assert.equal(cliCount(bin, 'gh'), 0, 'no gh call on malformed state.json')
+      assert.equal(readFileSync(statePath, 'utf-8'), badBefore, 'state.json untouched on malformed case')
+      assert.equal(readFileSync(join(root, '.mcp.json'), 'utf-8'), MCP_CI_ONLY, '.mcp.json untouched on malformed case')
+      // Case (c): state.json present and parses but missing smeeUrl
+      seedState(root, { webhookSecret: SECRET })
       const stateBefore = readFileSync(statePath, 'utf-8')
       res = await runRemove(['--repo', 'foo/bar'])
       assert.equal(res.exitCode, 1)
