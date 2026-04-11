@@ -1,0 +1,329 @@
+# Plan: `ci-channel setup` (Simpler Rebuild)
+
+## Metadata
+- **ID**: plan-2026-04-11-simpler-installer
+- **Status**: draft
+- **Specification**: codev/specs/5-simpler-installer.md
+- **Created**: 2026-04-11
+
+## Executive Summary
+
+Implement `ci-channel setup --repo owner/repo` as a single-file TypeScript module (`lib/setup.ts`, ≤150 lines) plus a 5-line dispatch in `server.ts` and a single test file (`tests/setup.test.ts`, ≤200 lines, ≤8 tests). The spec explicitly forbids module splits, DI, class hierarchies, new dependencies, interactive prompts, and "skip if already correct" optimizations.
+
+**On the spec's "one commit, one PR" rule and the two-phase split**: The spec forbids **phased implementation** of the installer itself — "not four phases" of 37 lines each. It does NOT require literal single-git-commit delivery: ongoing git history in this repo already routinely separates implementation commits from test commits even within a single PR. Porch's state machine requires a minimum of two machine-tracked phases to advance. This plan resolves the tension by using the single natural seam — implementation vs. tests — as the phase boundary. Both phases land in **one PR**, which is what the spec's "one PR" requirement actually enforces. The number of git commits is an artifact of porch bookkeeping, not a signal of splintered work. If the reviewer wants a single commit in the final merged PR, we can squash-merge at that step; the commits within the branch are for traceability.
+
+**Phase 1** delivers a working installer: `lib/setup.ts` + `server.ts` dispatch. **Phase 2** adds the automated test suite (`tests/setup.test.ts`) using the PATH-override fake-`gh` strategy from the spec.
+
+## Success Metrics
+
+Copied from `codev/specs/5-simpler-installer.md`:
+
+- [ ] `ci-channel setup --repo owner/repo` completes in under 10 seconds on a fresh project
+- [ ] Re-running on the same project is idempotent (no duplicate webhooks, no errors)
+- [ ] Works from any subdirectory of the target project
+- [ ] `ci-channel` with no args still runs the MCP server (existing behavior preserved)
+- [ ] All existing tests continue to pass (baseline count recorded in the Phase 1 commit message by running `npm test 2>&1 | tail -5` immediately before starting Phase 1 — do NOT trust the "291" number in the spec; it was accurate when the spec was written but the test count on `main` may have drifted)
+- [ ] `wc -l lib/setup.ts` ≤ 150
+- [ ] `wc -l tests/setup.test.ts` ≤ 200
+- [ ] `tests/setup.test.ts` contains ≤ 8 test cases
+- [ ] `lib/setup.ts` is a single file; `lib/setup/` does not exist
+- [ ] No new `package.json` dependencies
+- [ ] No `types.ts`, `errors.ts`, `io.ts`, `orchestrator.ts`, `InstallDeps`, `SetupError`, `UserDeclinedError`, `readline`, `@inquirer`, `confirm`, or `prompt` anywhere in `lib/setup.ts` or `package.json`
+- [ ] `server.ts` dispatch addition is ≤5 lines
+
+## Phases (Machine Readable)
+
+<!-- REQUIRED: porch uses this JSON to track phase progress. -->
+
+```json
+{
+  "phases": [
+    {"id": "impl", "title": "Implementation: lib/setup.ts + server.ts dispatch"},
+    {"id": "tests", "title": "Automated tests: tests/setup.test.ts"}
+  ]
+}
+```
+
+## Phase Breakdown
+
+### Phase 1: Implementation (`lib/setup.ts` + `server.ts` dispatch)
+
+**Dependencies**: None
+
+#### Objective
+
+Produce a working `ci-channel setup --repo owner/repo` command that performs the five operations in the spec (generate secret, fetch smee URL, write state, create/update webhook, register `.mcp.json`) in ≤150 lines of a single file, plus a ≤5-line dispatch in `server.ts`.
+
+#### Files
+
+- **Create**: `lib/setup.ts` — the entire installer, hard cap 150 lines including imports and comments
+- **Modify**: `server.ts` — add exactly the 5-line dispatch block from spec "Dispatch Integration" section
+
+No other files touched.
+
+#### Implementation Sketch
+
+`lib/setup.ts` structure (line budget is illustrative, not binding — total must stay ≤150):
+
+```
+imports from node:fs, node:path, node:child_process, node:crypto           ~6 lines
+imports from ./project-root.js, ./state.js, ./bootstrap.js                 ~3 lines
+constants: canonical .mcp.json ci entry, canonical webhook payload builder ~8 lines
+parseArgs(args: string[]): { repo: string }                                ~12 lines
+  - minimal loop / --repo extraction
+  - throws 'Usage: ci-channel setup --repo owner/repo' when missing
+ghApi(args: string[], stdinBody: string | null): Promise<string>           ~22 lines
+  - wraps spawn('gh', args) with stdio ['pipe', 'pipe', 'pipe']
+  - writes stdinBody to child.stdin if provided, then ends
+  - collects stdout, rejects on non-zero exit with stderr in message
+export async function setup(argv: string[]): Promise<void>                 ~75 lines
+  try {
+    const { repo } = parseArgs(argv)
+    const root = findProjectRoot(); if (!root) throw Error('No project root')
+    const statePath = join(root, '.claude', 'channels', 'ci', 'state.json')
+    const existing = loadState(statePath)
+    const secret = existing.webhookSecret ?? randomBytes(32).toString('hex')
+    let smeeUrl = existing.smeeUrl
+    if (!smeeUrl) {
+      smeeUrl = await fetchSmeeChannel()
+      if (!smeeUrl) throw Error('Failed to provision smee.io channel')
+    }
+    const desired = { webhookSecret: secret, smeeUrl }
+    // Correctness check, not optimization. PluginState has exactly two
+    // optional fields (webhookSecret, smeeUrl) per lib/state.ts; if on-disk
+    // state has more/different fields (manual edit, future version), the
+    // Object.keys length check catches it and we rewrite to match desired.
+    const unchanged =
+      existing.webhookSecret === secret &&
+      existing.smeeUrl === smeeUrl &&
+      Object.keys(existing).length === 2
+    if (!unchanged) {
+      mkdirSync(dirname(statePath), { recursive: true })
+      writeFileSync(statePath, JSON.stringify(desired, null, 2) + '\n', { mode: 0o600 })
+    }
+    const listOut = await ghApi(['api', '--paginate', '--slurp', `repos/${repo}/hooks`], null)
+    const hooks = JSON.parse(listOut).flat()
+    const existingHook = hooks.find((h: any) => h?.config?.url === smeeUrl)
+    const payload = JSON.stringify({ config: { url: smeeUrl, content_type: 'json', secret }, events: ['workflow_run'], active: true })
+    if (existingHook) {
+      await ghApi(['api', '--method', 'PATCH', `repos/${repo}/hooks/${existingHook.id}`, '--input', '-'], payload)
+    } else {
+      await ghApi(['api', '--method', 'POST', `repos/${repo}/hooks`, '--input', '-'], payload)
+    }
+    const mcpPath = join(root, '.mcp.json')
+    const mcp = existsSync(mcpPath) ? JSON.parse(readFileSync(mcpPath, 'utf-8')) : {}
+    // KEY-PRESENCE check (not truthiness). If `ci: null` or `ci: {}` exists,
+    // the user customized it; leave it alone. Only absent `ci` triggers write.
+    const servers = mcp.mcpServers ?? {}
+    if (!('ci' in servers)) {
+      mcp.mcpServers = { ...servers, ci: { command: 'npx', args: ['-y', 'ci-channel'] } }
+      writeFileSync(mcpPath, JSON.stringify(mcp, null, 2) + '\n')
+    }
+    console.log('Done. Launch Claude Code with `claude --dangerously-load-development-channels server:ci`.')
+  } catch (err) {
+    console.error(`[ci-channel] setup failed: ${(err as Error).message}`)
+    process.exit(1)
+  }
+```
+
+No `deepEqual` helper. The state comparison above is three inline boolean expressions (2 field checks + `Object.keys(existing).length === 2`). Adding a helper would be a spec violation (no helpers that exist solely for one-shot use).
+
+Total: ≈135 lines with blank lines and light comments. Safely under the 150-line cap with headroom for formatting.
+
+**`server.ts` dispatch** (exact block from spec, inserted after the existing imports and before `loadConfig()`):
+
+```typescript
+if (process.argv[2] === 'setup') {
+  const { setup } = await import('./lib/setup.js')
+  await setup(process.argv.slice(3))
+  process.exit(0)
+}
+```
+
+5 lines. No change to existing behavior when `argv[2]` is anything else.
+
+#### Acceptance Criteria
+
+- [ ] `wc -l lib/setup.ts` reports ≤ 150
+- [ ] `git diff server.ts | grep -c '^+[^+]'` reports ≤ 5 net added lines (the `^+[^+]` pattern excludes the `+++ b/server.ts` header that a naive `^+` would match; an off-by-one check was caught in review)
+- [ ] `ls lib/setup/` fails (directory does not exist)
+- [ ] `grep -E 'InstallDeps|SetupError|UserDeclinedError|readline|@inquirer|confirm\(|prompt\(' lib/setup.ts` returns nothing
+- [ ] `grep '"@inquirer' package.json` returns nothing
+- [ ] `npm run build` succeeds (TypeScript compiles; `dist/server.js` is produced and chmod'd)
+- [ ] `npm test` passes with the same number of tests as baseline (baseline recorded at start of Phase 1 by running `npm test 2>&1 | tail -5` against the current worktree — no tests added in Phase 1, so the count must be unchanged)
+
+#### Test Plan
+
+Phase 1 produces no automated tests. The TypeScript compiler + existing test suite is the regression gate. Full automated coverage comes in Phase 2.
+
+A **manual smoke run** is documented in the Phase 1 commit message but is **NOT** an acceptance criterion — it requires a live `gh auth` session, a throwaway GitHub repo, and a reachable `smee.io`, none of which are guaranteed in CI or in a builder worktree. If the builder can run the smoke, great; if not, skip it and rely on Phase 2's automated tests for correctness validation. The smoke run is intelligence for the reviewer, not a gate.
+
+#### Rollback Strategy
+
+Revert the Phase 1 commit. `server.ts` returns to its current state; `lib/setup.ts` disappears. No migrations, no schema changes, no external state to unwind.
+
+#### Risks
+
+- **Risk**: Line budget overshoot. The sketch projects ~134 lines but formatting choices (Prettier width, comment blocks, trailing commas) can push it over 150.
+  - **Mitigation**: Check `wc -l lib/setup.ts` before each commit. If over cap, tighten by removing redundant destructures, collapsing single-use helpers, or shortening error messages. Do NOT extract to a second file.
+- **Risk**: `gh api --paginate --slurp` output shape surprises. If `gh` versions differ, the array-of-arrays shape could be an array-of-objects on some setups.
+  - **Mitigation**: Spec fixes `gh` ≥ 2.29. `.flat()` on an already-flat array is a no-op, so the code is safe in either shape. Document the `gh` version requirement in the commit message.
+- **Risk**: Top-level `await` in `server.ts` breaks some build path.
+  - **Mitigation**: `tsconfig.json` is `target: ES2022`, `module: NodeNext`; TLA is supported. Verify with `npm run build` and by running the compiled `dist/server.js`.
+- **Risk**: `fetchSmeeChannel` makes a live network call during manual smoke. If smee.io is down, manual smoke fails.
+  - **Mitigation**: The automated tests in Phase 2 do not depend on smee.io (they prepopulate state.json). The manual smoke is a belt-and-suspenders check, not required for commit.
+
+---
+
+### Phase 2: Automated tests (`tests/setup.test.ts`)
+
+**Dependencies**: Phase 1 (committed)
+
+#### Objective
+
+Produce `tests/setup.test.ts` with the 8 scenarios from the spec, using the PATH-override fake-`gh` strategy and state.json prepopulation (no `globalThis.fetch` stubbing). Hard cap 200 lines, ≤8 tests.
+
+#### Files
+
+- **Create**: `tests/setup.test.ts` — the entire test suite, hard cap 200 lines, ≤8 `test(...)` calls
+
+No other files touched. In particular, no `lib/setup.ts` modifications "for testability."
+
+#### Test Helpers (inline in `tests/setup.test.ts`, NOT in a separate helpers file)
+
+The test file contains two small helpers defined at the top, inside the same file, above the `describe`:
+
+1. `mkFakeGh(dir, responses)` — writes an executable POSIX shell script to `<dir>/gh`. The script reads stdin, writes a JSON lines log to `<dir>/gh.log` (one entry per invocation with `argv` + `stdin`), and prints a canned response from the `responses` array (consumed in order). Each response is `{ stdout, stderr, exitCode }` where `stderr` is written to fd 2 before the script exits with `exitCode`. Implementation: the test pre-serializes responses into files inside `dir` (e.g., `<dir>/gh.out.1`, `<dir>/gh.err.1`, `<dir>/gh.exit.1`) and the shell script reads the N-th set based on a counter in `<dir>/gh.counter`.
+2. `withFakeGh(dir, fn)` — saves `process.env.PATH`, prepends `dir`, runs `fn()`, restores `PATH` in a `finally`.
+
+Both helpers are ~25 lines total. They do not escape the file. The `stderr` field exists specifically so Scenario 5 can assert on a non-zero-exit API error message from a failing `gh api POST`.
+
+#### The 8 Scenarios (verbatim from spec)
+
+1. **Happy path with prepopulated state**: seed state.json with fake `smeeUrl` + `webhookSecret`, no hook, no .mcp.json. Fake `gh`: list returns `[]`, POST succeeds. Assert: POST was called with the canonical payload containing the seeded secret + URL; .mcp.json was created with the canonical `ci` entry; state.json contents byte-equal to seed; state.json mode is `0o600` (skip on win32).
+2. **Idempotent re-run**: seed state.json, seed .mcp.json with `mcpServers.ci` (canonical), fake `gh` list returns `[{ id: 42, config: { url: seed.smeeUrl } }]`, PATCH succeeds. Assert: PATCH was called exactly once on `/hooks/42` with the canonical payload; state.json byte-equal; .mcp.json byte-equal.
+3. **State present, webhook missing**: seed state.json, seed .mcp.json with canonical `ci` entry, fake `gh` list returns `[]`, POST succeeds. Assert: POST called (not PATCH); state.json byte-equal; .mcp.json byte-equal.
+4. **Re-run with existing .mcp.json that has other servers**: seed state.json, seed .mcp.json with `mcpServers: { other: { command: "foo" } }` (no `ci` key), fake `gh` list returns `[]`, POST succeeds. Assert: after setup, .mcp.json contains both `other` (byte-equal under `mcpServers.other`) and the canonical `ci` entry.
+5. **CREATE failure (state-first ordering)**: seed state.json with `{ smeeUrl: "..." }` only (no secret), fake `gh` list returns `[]`, POST exits non-zero with stderr "API error". Catch the `process.exit(1)` via `t.mock.method(process, 'exit', ...)` or wrap the call in a try/catch that expects rejection. Assert: state.json on disk now contains both the original `smeeUrl` and a non-empty `webhookSecret` (proves the state write happened before the POST attempt).
+6. **Project root from subdirectory**: mkdtemp, create `<tmp>/.git/`, create `<tmp>/src/foo/`, prepopulate `<tmp>/.claude/channels/ci/state.json`, `process.chdir(<tmp>/src/foo/)`, fake `gh` list returns `[]`, POST succeeds. Assert: `<tmp>/.mcp.json` exists with canonical entry. Restore `process.cwd()` in a `finally`.
+7. **No project root**: mkdtemp, `process.chdir(tmp)` (no `.git`, no `.mcp.json`, no ancestors with either), call `setup(['--repo', 'foo/bar'])`. Assert: `process.exit(1)` called and stderr contains "project root". **Restore `process.cwd()` in a `finally`** (same pattern as Scenario 6) to avoid leaking a deleted temp dir as cwd into subsequent tests.
+8. **Missing `--repo`**: call `setup([])`. Assert: `process.exit(1)` called and stderr contains "--repo". No cwd change, so no cwd restore needed.
+
+#### Implementation Details
+
+- Use `node:test` — same as the rest of the suite (`tests/integration.test.ts`, `tests/reconcile.test.ts`, etc.). Import `{ describe, test, before, after }` and `assert` from `node:assert/strict`.
+- Capture stderr/stdout by replacing `process.stderr.write` / `process.stdout.write` in a `before` hook and restoring in an `after` hook. Push writes to an array the tests can assert against.
+- Intercept `process.exit` the same way — replace it with a function that throws a sentinel error, catch it in the test, then assert on the captured exit code. Restore in `after`.
+- `mkdtempSync(join(tmpdir(), 'setup-test-'))` for each test's temp root. Clean up with `rmSync` in a `finally`.
+- Skip Scenarios 1–6 when `process.platform === 'win32'` because the PATH-override fake `gh` is a POSIX shell script. Scenarios 7 and 8 are platform-independent and always run.
+
+#### Acceptance Criteria
+
+- [ ] `wc -l tests/setup.test.ts` reports ≤ 200
+- [ ] `grep -cE '^ *(test|it)\(' tests/setup.test.ts` reports ≤ 8
+- [ ] `npm test` passes (baseline count from Phase 1 + 8 new tests; platform-skipped tests count as skipped, not failed)
+- [ ] No files under `lib/setup/`
+- [ ] No changes to `lib/setup.ts` relative to Phase 1 (the test suite does not require production-code tweaks)
+- [ ] On unix CI, scenarios 1–6 run (not skipped); on win32 CI, scenarios 1–6 report as skipped
+
+#### Test Plan
+
+Phase 2 IS the test plan. Meta-validation:
+
+- Run `node --import tsx/esm --test tests/setup.test.ts` to verify the new file runs in isolation
+- Run `npm test` to verify no regressions in the existing suite
+- On failure, read the captured stdout/stderr and gh.log from the temp dir of the failing scenario
+
+#### Rollback Strategy
+
+Revert the Phase 2 commit. `tests/setup.test.ts` disappears. Phase 1's implementation remains functional but untested by the new suite.
+
+#### Risks
+
+- **Risk**: Line budget overshoot (200 lines). Eight scenarios + helpers + setup/teardown is tight.
+  - **Mitigation**: Extract the repetitive "mkdtemp + mkFakeGh + withFakeGh" sequence into a local helper `runSetupWithFakeGh({ state, hooks, responses, mcpJson })`. Keep scenario bodies to ~15 lines each. If still over cap, compress error-case scenarios (5, 7, 8) since their bodies are small.
+- **Risk**: `process.exit` / `process.stderr.write` patching leaks between tests if an assertion throws before the restore runs.
+  - **Mitigation**: Use `t.after` / `after` hooks rather than manual `try/finally`, so Node's test runner restores on failure. Alternatively wrap the core of each test in a try/finally that restores explicitly.
+- **Risk**: Shell script permissions or `sh` availability fails on some unix CI images.
+  - **Mitigation**: Use `#!/bin/sh` (POSIX) not `#!/bin/bash`. Set mode `0o755` when writing. On any failure, skip the test with a diagnostic naming the host platform so debugging is easy.
+- **Risk**: Scenario 5's `process.exit(1)` assertion is brittle. If `setup()` refactors to throw instead of exit, the test breaks.
+  - **Mitigation**: The spec mandates `process.exit(1)` in Required Behavior 10. Any refactor away from that is a spec violation; the brittle test is a feature, not a bug.
+
+---
+
+## Dependency Map
+
+```
+Phase 1 (impl) ──→ Phase 2 (tests)
+```
+
+Phase 2 strictly depends on Phase 1. Phase 2 cannot run in the absence of `lib/setup.ts`.
+
+## Validation Checkpoints
+
+1. **After Phase 1**: `npm run build` passes; `npx tsx server.ts setup --repo <disposable/repo>` end-to-end smoke passes against a throwaway repo; `wc -l lib/setup.ts` ≤ 150; all 291 existing tests still green.
+2. **After Phase 2**: `npm test` passes with 8 new tests; `wc -l tests/setup.test.ts` ≤ 200; test count check passes; review-gate grep checklist from spec passes.
+3. **Before PR merge**: Reviewer runs the full spec review-gate checklist (10 items in spec's "Review Gate Enforcement" section).
+
+## Integration Points
+
+- **External**: `gh` CLI ≥ 2.29 (user-provided, not a package dep). `gh auth status` must pass in the user's environment before running `ci-channel setup`.
+- **External**: `smee.io` — `fetchSmeeChannel` reaches `https://smee.io/new` on first-run installs. Failure → `setup` exits non-zero. No retries.
+- **Internal**: reuses `findProjectRoot` (`lib/project-root.ts`), `loadState` (`lib/state.ts`), `fetchSmeeChannel` (`lib/bootstrap.ts`). No changes to these modules.
+
+## Risk Analysis
+
+| Risk | Probability | Impact | Mitigation |
+|---|---|---|---|
+| Line budget overshoot on `lib/setup.ts` | Medium | High (spec violation → REQUEST_CHANGES) | Check `wc -l` before every commit; tighten by shortening identifiers, not by extracting helpers |
+| Line budget overshoot on `tests/setup.test.ts` | Medium | Medium (not as strictly enforced but still a cap) | Extract `runSetupWithFakeGh` helper inside the test file; compress error-case scenarios |
+| `process.exit` patching flakiness | Low | Medium (test instability) | Use `node:test`'s `after` hooks; avoid shared state between tests |
+| `gh` unavailable on CI | Low | Low (tests use fake `gh` on PATH; real `gh` is not invoked) | n/a — fake `gh` via PATH override means real `gh` is never touched during tests |
+| Spec-3-style review churn | Low | High (multiple iterations) | Spec is tight; plan respects every constraint; single natural seam (impl vs tests) for phases; no hidden fast paths; no DI; no new modules |
+
+## What This Plan Does NOT Include
+
+- No separate helpers module (`lib/setup-helpers.ts`, `lib/gh-wrapper.ts`, etc.)
+- No new interface files (`lib/types.ts`, `lib/setup-types.ts`)
+- No refactor of `lib/bootstrap.ts`, `lib/state.ts`, or `lib/project-root.ts`
+- No changes to `package.json` (no new deps, no new scripts beyond what `npm test` already runs)
+- No changes to `tsconfig.json`
+- No CI workflow changes
+- No README or INSTALL.md updates in Phase 1 or 2. (Docs are a Review-phase concern; if any user-visible behavior changes from what INSTALL.md already documents, the reviewer flags it. The spec says the command should produce the same end state as the manual 5-step process in INSTALL.md, so no user-visible doc changes are expected.)
+
+## Expert Review
+
+### Plan iteration 1 (Codex, Gemini, Claude)
+
+- **Gemini**: APPROVE (no issues).
+- **Codex**: REQUEST_CHANGES.
+- **Claude**: APPROVE with minor nits.
+
+All substantive concerns were fixed in-place before re-consult. Summary of changes:
+
+**From Codex REQUEST_CHANGES**:
+
+1. **"Two-phase plan vs one-commit spec"** — Expanded the Executive Summary to explain that the spec's "one commit, one PR" forbids phased implementation of the 150-line installer, not literal single-git-commit delivery. Both phases land in one PR; the number of commits inside the branch is porch bookkeeping and can be squash-merged at merge time if the reviewer prefers a single final commit.
+2. **State equality reduced to two-field compare** — The `PluginState` interface in `lib/state.ts` declares exactly two fields (`webhookSecret?`, `smeeUrl?`), but an on-disk state.json could have extra fields from manual edits or a future schema. Updated the sketch to include `Object.keys(existing).length === 2` as a third condition of the `unchanged` check. If extra fields exist, the check fails, the write happens, and the rewrite drops the extras — which is the spec's intent: "write the desired state."
+3. **`.mcp.json` truthiness check** — Replaced `if (!mcp.mcpServers?.ci)` with `if (!('ci' in servers))`. This treats `ci: null`, `ci: {}`, `ci: { ... custom ... }` all as "present" and preserves user customizations. Only an absent key triggers the write.
+4. **Fake `gh` helper missing stderr support** — Updated `mkFakeGh` response shape from `{ stdout, exitCode }` to `{ stdout, stderr, exitCode }`. Scenario 5's "API error" stderr assertion now has a seam to produce that output.
+5. **Scenario 7 cwd restore** — Added explicit `finally` cwd restoration to Scenario 7 so it doesn't leak a deleted-temp-dir cwd to subsequent tests.
+
+**From Claude APPROVE-with-nits**:
+
+1. **`git diff server.ts | grep '^+' | wc -l ≤ 5` off-by-one** — Replaced with `grep -c '^+[^+]'`, which excludes the `+++ b/server.ts` header line that `^+` would false-match.
+2. **Hardcoded "291 tests" baseline** — Removed the literal count from the Success Metrics and the Phase 1 acceptance criterion. Replaced with "record the actual baseline at the start of Phase 1 by running `npm test 2>&1 | tail -5`" so the check is relative to current `main`, not a possibly-stale number from the spec.
+3. **`deepEqual` sketch vs prose inconsistency** — Rewrote the sketch to show the explicit three-condition boolean expression, removed the `deepEqual(a, b) helper — ~8 lines` line, and added a comment explicitly forbidding the helper.
+4. **Manual smoke run in acceptance AND "not required"** — Removed from acceptance criteria. Now documented as "recorded in commit message if feasible, but not a gate." The smoke run requires live `gh auth` + disposable repo + smee.io reachable, none of which are guaranteed in a builder worktree.
+
+**Non-blocking notes from Claude** (verified, no action):
+
+- `server.ts` static imports (forges, bootstrap, reconcile) still evaluate in `setup` mode. This is acceptable under the ≤5-line dispatch cap; the builder should mention it in the Phase 1 commit message as a known, intentional trade-off.
+- `loadState(path?: string)`, `fetchSmeeChannel(): Promise<string | null>`, and `findProjectRoot(startDir?: string): string | null` signatures all verified against the current `lib/` code.
+- Hardcoding the project-scoped state path `join(root, '.claude', 'channels', 'ci', 'state.json')` rather than calling `getDefaultStatePath()` is correct — `getDefaultStatePath()` falls back to the legacy global path, which the spec explicitly forbids.
+
+## Notes
+
+- The 150-line cap is the MAXIMUM, not the minimum. If the implementation comes in at 120 lines, that is better. Do not pad.
+- If during Phase 1 implementation it becomes clear a constraint is impossible to satisfy (e.g., 150 lines is unachievable because of a TypeScript type issue), STOP, write a clear blocker message, and notify the architect. Do not smuggle in helpers or workarounds.
+- `codev/resources/lessons-learned.md` entry "Prefer single-file implementations + real-fs tests for install/bootstrap commands" is the authoritative post-mortem. Consult it when in doubt about any tradeoff.

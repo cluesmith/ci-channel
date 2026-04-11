@@ -17,6 +17,11 @@ import { gitlabForge } from "./lib/forges/gitlab.js";
 import { giteaForge } from "./lib/forges/gitea.js";
 import type { Forge } from "./lib/forge.js";
 
+if (process.argv[2] === "setup") {
+  const { setup } = await import("./lib/setup.js");
+  await setup(process.argv.slice(3));
+  process.exit(0);
+}
 const initialConfig = loadConfig();
 
 // Select forge implementation based on config

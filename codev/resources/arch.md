@@ -1,6 +1,6 @@
 # CI Channel — Architecture
 
-> Last updated: 2026-04-09
+> Last updated: 2026-04-11
 
 ## Overview
 
@@ -36,7 +36,9 @@ ci-channel/
 │   ├── handler.ts             # Webhook handler pipeline (orchestrates the flow)
 │   ├── webhook.ts             # WebhookEvent interface, dedup, filtering (forge-agnostic)
 │   ├── notify.ts              # Notification formatting, sanitization, MCP push
-│   └── reconcile.ts           # Startup reconciliation orchestration
+│   ├── reconcile.ts           # Startup reconciliation orchestration
+│   ├── project-root.ts        # Walk-up project root discovery (.mcp.json / .git)
+│   └── setup.ts               # `ci-channel setup --repo owner/repo` installer (Spec 5)
 ├── tests/
 │   ├── forges/
 │   │   ├── gitlab.test.ts     # GitLab forge unit tests
@@ -49,6 +51,7 @@ ci-channel/
 │   ├── integration.test.ts    # GitHub HTTP pipeline end-to-end
 │   ├── integration-gitlab.test.ts  # GitLab HTTP pipeline end-to-end
 │   ├── integration-gitea.test.ts   # Gitea HTTP pipeline end-to-end
+│   ├── setup.test.ts               # `ci-channel setup` installer (8 scenarios, PATH-override fake gh)
 │   ├── stdio-lifecycle.test.ts     # MCP stdio stability regression
 │   └── fixtures/
 │       ├── workflow-run-failure.json      # GitHub webhook payload
@@ -161,6 +164,19 @@ Exports `runCommand(args, timeoutMs)` — spawns a CLI command with timeout, ret
 ### Reconciliation (`lib/reconcile.ts`)
 
 **Purpose**: Generic startup reconciliation loop. Iterates branches, calls `forge.runReconciliation()` per branch, applies workflow filter, pushes notifications.
+
+### Installer (`lib/setup.ts`)
+
+**Purpose**: Implements the `ci-channel setup --repo owner/repo` subcommand. A deliberately single-file, non-DI, ≤150-line implementation that performs the five install operations (generate/load secret, fetch/load smee URL, write state.json, create/update GitHub webhook via `gh api`, register `ci` in `.mcp.json`) and exits. Spec 5 constrains the file rigidly after Spec 3's 4,385-line attempt was abandoned — see `codev/resources/lessons-learned.md` entry "Prefer single-file implementations + real-fs tests for install/bootstrap commands."
+
+**Design choices worth knowing about**:
+- **No DI**: calls `fs`, `spawn`, `fetch` (via `fetchSmeeChannel`) directly. Tests use a PATH-override fake `gh` binary and prepopulate state.json to skip the smee fetch path.
+- **State-first ordering**: state.json is written before any webhook API call on all paths where a write is needed, so a partial failure leaves the secret/URL persisted for the next run.
+- **Conditional write**: state.json is only written when the computed desired state deep-differs from what's on disk (checked by `webhookSecret` + `smeeUrl` field equality plus `Object.keys(existing).length === 2`). This is a correctness check, not a speed optimization — it avoids mtime churn on idempotent re-runs.
+- **Key-presence `.mcp.json` merge**: if `mcpServers.ci` is present (regardless of contents), the file is left alone. This respects user customizations like manually adding `--repos` to `args`.
+- **Always-PATCH**: when a matching webhook is found by URL, the installer PATCHes it with the canonical payload unconditionally. No "skip if already correct" fast path.
+
+**Dispatch**: `server.ts` checks `process.argv[2] === 'setup'` as a 5-line block before `loadConfig()` and dynamically imports `./lib/setup.js`. Everything else on the CLI (forges, flags) passes through unchanged.
 
 ## Data Flow
 
