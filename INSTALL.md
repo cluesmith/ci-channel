@@ -47,6 +47,18 @@ claude --dangerously-load-development-channels server:ci
 
 Re-running the setup command is idempotent on all three forges. If anything fails mid-way (e.g., `gh api` returns non-zero), fix the underlying problem and re-run — no state gets into an inconsistent position.
 
+### Uninstall: `ci-channel remove`
+
+The inverse of `setup` exists for all three forges with the same flag shape:
+
+```bash
+npx -y ci-channel remove --repo OWNER/REPO                                # GitHub
+npx -y ci-channel remove --forge gitlab --repo GROUP/PROJECT              # GitLab
+npx -y ci-channel remove --forge gitea --gitea-url URL --repo OWNER/REPO  # Gitea
+```
+
+`remove` deletes the forge webhook (404 on DELETE is treated as "already gone"), deletes `state.json`, strips the canonical `ci` entry from `.mcp.json` (leaves it alone if customized), and reverts the Codev integration if present. Running `remove` on a project with no `state.json` fails fast with `no ci-channel install detected in this project`.
+
 **Current limitations**:
 - No `--yes`, `--dry-run`, `--rotate`, or `--smee-url` flags — running the command IS the confirmation. Edit `state.json` by hand if you need a specific smee channel.
 - The installer requires a detectable project root; it does NOT fall back to `~/.claude/channels/ci/` the way the runtime plugin does.

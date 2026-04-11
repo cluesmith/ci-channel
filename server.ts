@@ -17,9 +17,9 @@ import { gitlabForge } from "./lib/forges/gitlab.js";
 import { giteaForge } from "./lib/forges/gitea.js";
 import type { Forge } from "./lib/forge.js";
 
-if (process.argv[2] === "setup") {
-  const { setup } = await import("./lib/setup.js");
-  await setup(process.argv.slice(3));
+if (process.argv[2] === "setup" || process.argv[2] === "remove") {
+  const mod = await import("./lib/setup.js");
+  await (process.argv[2] === "setup" ? mod.setup : mod.remove)(process.argv.slice(3));
   process.exit(0);
 }
 const initialConfig = loadConfig();
