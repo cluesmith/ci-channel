@@ -34,6 +34,7 @@ function parseArgs(argv: string[]): { repo: string; forge: Forge; giteaUrl?: str
   if (!repo) throw new Error('Usage: ci-channel setup --repo owner/repo [--forge github|gitlab|gitea] [--gitea-url URL]')
   if (forge === 'gitea' && !giteaUrl) throw new Error('--gitea-url is required when --forge gitea')
   if (forge !== 'gitea' && giteaUrl) throw new Error('--gitea-url is only valid with --forge gitea')
+  if (giteaUrl && !/^https?:\/\//i.test(giteaUrl)) throw new Error(`--gitea-url must start with http:// or https:// (got '${giteaUrl}')`)
   return { repo, forge, giteaUrl }
 }
 
