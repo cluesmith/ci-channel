@@ -59,7 +59,7 @@ Each command, in one invocation, reverses everything `ci-channel setup` did (or 
 - If `.codev/config.json` exists and its `shell.architect` string contains the loader flag, strips the flag (and any single leading space) from the string and writes the file back.
 - Prints a summary of exactly what changed, in the same `[ci-channel] ...` progress-line style as `setup`.
 
-Re-running `ci-channel remove` after a successful remove is idempotent and exits 0. Missing `state.json`, missing webhook, missing `.mcp.json`, missing `.codev/config.json` all result in a log line ("nothing to do") and no error — **except** the "no ci-channel install detected in this project" case when the user runs `remove` in a project that was never set up, which fails fast with a clear message (see "Required vs optional preconditions" below).
+Re-running `ci-channel remove` after a successful remove **fails fast** with exit code 1 and a clear "no ci-channel install detected" message, because `state.json` (the precondition) is gone. This is NOT "idempotent exit-0" — it is "the second run tells you the install is already gone, same way the first run would have if you'd run it in a fresh project." See "Required vs optional preconditions" and "Idempotency" below for the full rule. Missing webhook, missing `.mcp.json`, or missing `.codev/config.json` during an otherwise-valid remove (state.json present) result in a log line ("nothing to do for this step") and no error.
 
 ## Success Criteria
 
@@ -67,11 +67,12 @@ Re-running `ci-channel remove` after a successful remove is idempotent and exits
 - [ ] `ci-channel remove --forge gitlab --repo group/project` does the same for GitLab — verified by fake-CLI test.
 - [ ] `ci-channel remove --forge gitea --gitea-url URL --repo owner/repo` does the same for Gitea — verified by local-HTTP-server test.
 - [ ] Running `remove` in a project that was never set up fails fast with `no ci-channel install detected in this project` and exit code 1.
-- [ ] Running `remove` twice in a row on the same project: the first succeeds, the second fails fast with the same "no install detected" message (because `state.json` is gone after the first run).
-- [ ] If the user's `.mcp.json` `ci` entry is non-canonical (they added extra flags, changed the command, or nested additional config), `remove` leaves the entry alone, logs a warning, and still removes everything else.
+- [ ] Running `remove` twice in a row on the same project: the first succeeds and exits 0, the second fails fast with "no install detected" and exit code 1 (because `state.json` is gone after the first run). **This is intentional "not idempotent exit-0" behavior** — `state.json` is the source of truth for "is ci-channel installed," and telling the user "nothing installed here" via a non-zero exit is more informative than a silent no-op.
+- [ ] Running `remove` with `state.json` present but malformed (invalid JSON, missing `smeeUrl`, or unreadable) fails fast with a distinct, actionable error message (different from the "not installed" message), exit code 1, and **without touching `.mcp.json`, `.codev/config.json`, or any forge API**.
+- [ ] If the user's `.mcp.json` `ci` entry is non-canonical (does not match the full expected shape for the passed `--forge`, including extra keys, changed command, or different args), `remove` leaves the entry alone, logs a warning, and still removes everything else.
 - [ ] If `.codev/config.json` exists and contains the loader flag, `remove` strips the flag (and exactly one leading space) from `shell.architect` and writes the file back in canonical 2-space JSON.
 - [ ] If `.codev/config.json` does not exist, `remove` does not create it and does not log a Codev-related message.
-- [ ] A deleted webhook on the forge side (`404` from the `DELETE` call, or no matching hook in the list) is NOT an error — log and skip.
+- [ ] A deleted webhook on the forge side — 404 **on the DELETE call** (not on the list call), or no matching hook in the list — is NOT an error. A 404 **on the LIST call** IS a hard failure (repo/project not found).
 - [ ] All existing tests continue to pass (baseline recorded in the impl phase commit message).
 - [ ] `wc -l lib/setup.ts` ≤ 400.
 - [ ] `wc -l tests/setup.test.ts` ≤ 600 (raised from 400 — see "Test budget" below).
@@ -145,10 +146,17 @@ ci-channel remove --forge gitea --gitea-url URL --repo owner/repo
 
 ### Required vs optional preconditions
 
-- **`state.json` is REQUIRED.** If it's missing, `remove` fails fast with `no ci-channel install detected in this project (no state.json at <path>). Nothing to uninstall.` Rationale: without `state.json` we don't know the smee URL, so we can't match the webhook on the forge side, so we can't do the primary job of `remove`. Faking our way through "delete something that might be the right hook" is worse than just failing.
-- **The forge-side webhook is OPTIONAL.** If `state.json` is present but the webhook has already been deleted (or never existed), `remove` logs `no matching webhook found on <forge>; skipping webhook delete` and continues with the local cleanup.
-- **`.mcp.json` is OPTIONAL.** If missing, skip. If present but no `ci` key, skip. If present with a non-canonical `ci` key, leave it alone and log a warning (see below).
-- **`.codev/config.json` is OPTIONAL.** If missing, skip silently. If present but no `shell.architect`, log and skip (same shape-check as setup). If present with `shell.architect` not containing the loader flag, log and skip.
+- **Project root is REQUIRED.** `findProjectRoot()` must succeed. If it returns `null`, `remove` fails fast with the same error setup uses: `No project root found (no .git/ or .mcp.json in any ancestor). Run this from inside the project you want to uninstall from.` Exit 1.
+- **`state.json` is REQUIRED and must contain a non-empty `smeeUrl`.** There are three failure sub-cases:
+  1. **File missing** (`existsSync(statePath) === false`): fail fast with `no ci-channel install detected in this project (no state.json at <path>). Nothing to uninstall.` Exit 1.
+  2. **File present but unreadable or not valid JSON**: fail fast with `state.json at <path> is unreadable or malformed: <error message>. Fix or delete the file, then retry.` Exit 1. The implementation MUST NOT use the existing `loadState()` helper (which swallows read/parse failures and returns `{}`), because that would conflate "file missing" with "file corrupt" and produce a less actionable error. Use `readFileSync` + `JSON.parse` directly inside a try/catch.
+  3. **File present and parses but `smeeUrl` is missing, empty, or not a string**: fail fast with `state.json at <path> is missing a 'smeeUrl' field. Cannot match webhook. If you want to force a reinstall, delete state.json and re-run \`ci-channel setup\`.` Exit 1.
+
+  Rationale: without a valid `smeeUrl` we don't know which webhook to delete on the forge side, so we can't do the primary job of `remove`. Faking our way through "delete something that might be the right hook" is worse than just failing. All three sub-cases exit before any forge call and before touching any other local file.
+- **For Gitea: `GITEA_TOKEN` is REQUIRED.** Same precondition check and ordering as setup — fails fast before any webhook work if missing. See step 4 of "Order of operations."
+- **The forge-side webhook is OPTIONAL.** If `state.json` is valid but the webhook has already been deleted (or never existed), `remove` logs `no matching webhook found on <forge>; skipping webhook delete` and continues with the local cleanup.
+- **`.mcp.json` is OPTIONAL.** If missing, log `no .mcp.json found — skipping`. If present but no `ci` key under `mcpServers`, log `no 'ci' entry in .mcp.json — skipping`. If present with `mcpServers` not an object, log warning and skip (see "Defensive shape handling" in the canonical-entry section). If present with a non-canonical `ci` key, leave it alone and log a warning (see below).
+- **`.codev/config.json` is OPTIONAL.** If missing, skip silently (no log line). If present but no `shell.architect`, log and skip (same shape-check as setup). If present with `shell.architect` not containing the loader flag, log and skip.
 
 ### Arg parsing strategy
 
@@ -158,38 +166,39 @@ This is a recommendation, not a hard rule. A 20-line duplicated `parseRemoveArgs
 
 ### "Canonical entry" check for `.mcp.json`
 
-The `ci` entry in `.mcp.json` is **canonical** if it exactly matches the shape written by `setup`:
+The `ci` entry in `.mcp.json` is **canonical** if it exactly matches the shape that `setup` writes for the current `--forge`. This is a **strict full-array equality check** against the forge-specific expected args.
 
-```json
-{
-  "command": "npx",
-  "args": ["-y", "ci-channel", ...forge-specific-args]
-}
-```
+**Expected canonical shape** (forge-specific):
 
-Forge-specific args (as written by setup):
-- **GitHub**: `["-y", "ci-channel"]`
-- **GitLab**: `["-y", "ci-channel", "--forge", "gitlab"]`
-- **Gitea**: `["-y", "ci-channel", "--forge", "gitea", "--gitea-url", <base>]`
+| Forge | Expected `args` |
+|---|---|
+| `github` | `["-y", "ci-channel"]` |
+| `gitlab` | `["-y", "ci-channel", "--forge", "gitlab"]` |
+| `gitea`  | `["-y", "ci-channel", "--forge", "gitea", "--gitea-url", <base>]` where `<base>` matches `giteaUrl.replace(/\/$/, '')` from the CLI flag |
 
-The canonical-check rule:
+The canonical-check rule (all must hold):
 
-- `entry.command === 'npx'` (exact match, not startsWith, not includes)
-- `entry.args` is an array
-- `entry.args[0] === '-y'` and `entry.args[1] === 'ci-channel'` (exact, first two positions)
-- No other properties on `entry` besides `command` and `args` (use `Object.keys(entry).sort().join(',') === 'args,command'`)
+1. `entry` is an object.
+2. `Object.keys(entry).sort().join(',') === 'args,command'` (no extra keys like `env`, `cwd`, etc.).
+3. `entry.command === 'npx'` (exact match).
+4. `Array.isArray(entry.args)` is true.
+5. `JSON.stringify(entry.args) === JSON.stringify(expectedArgs)` where `expectedArgs` is the forge-specific array from the table above, built using **the same `--forge` / `--gitea-url` values passed to `remove`**.
 
-If these hold, the entry is canonical and `remove` deletes it. If any check fails, `remove` logs a warning and leaves the entry alone:
+If all five checks pass, the entry is canonical and `remove` deletes it. If any check fails, `remove` logs a warning and leaves the entry alone:
 
 ```
-[ci-channel] warning: .mcp.json 'ci' entry is customized (not the canonical shape written by setup). Leaving it alone. Edit .mcp.json manually if you want to remove it.
+[ci-channel] warning: .mcp.json 'ci' entry does not match the canonical shape for --forge <forge>. Leaving it alone. Edit .mcp.json manually if you want to remove it.
 ```
 
-**Why `args[0]` and `args[1]` only, not the whole array?** Because the forge-specific trailing args (`--forge gitlab`, `--gitea-url URL`) were written by setup based on the `--forge` flag at setup time, and we don't want `remove` to refuse to clean up a GitLab install just because the user originally set up with `--forge gitlab` and now runs `remove --forge gitlab` (the full array would match, so actually the full check would pass in the happy path). The real reason for not doing a full array-equality check is: if setup writes a 7-element args array and the user hand-edits one trailing element, we should still treat it as "customized" and leave it alone. But if we check only `[0]` and `[1]`, we correctly detect the "user added a suffix" case. The alternative — strict array equality — would refuse to remove entries that setup itself wrote after a `--gitea-url` change, which is wrong.
+**Why strict full-array equality?** The user must pass the same `--forge` (and `--gitea-url` if applicable) to `remove` as they passed to `setup`. That's not a burden — they already know which forge they installed against (they're running `remove --repo owner/repo` against that forge's webhook anyway). Given the forge is known, the full expected `args` array is known, so we can check it exactly. This is stricter than a partial check and correctly refuses to remove any entry a user has hand-edited (e.g., added a trailing `--workflow-filter foo`, changed the `-y` to something else, replaced `ci-channel` with a local path).
 
-The `command === 'npx'` + `args[0:2] === ['-y', 'ci-channel']` + key-count check is the right tradeoff: strict enough to catch "the user replaced `command` with `node` and a hand-path" or "the user wrapped the whole thing in extra config keys," lenient enough to not false-positive on users who reran setup with a different forge.
+**Note on `--gitea-url` normalization**: setup writes `<gitea-url>.replace(/\/$/, '')` into the entry's `args`. Remove must apply the same normalization before comparing, so `--gitea-url https://gitea.example.com/` passed to `remove` matches an entry written by setup with `--gitea-url https://gitea.example.com`.
 
-When the `ci` entry IS removed, the `.mcp.json` file is rewritten in canonical 2-space JSON with a trailing newline, same as setup does on write. If removing the `ci` key leaves `mcpServers` as an empty object `{}`, **leave the empty object** — do not delete the `mcpServers` key itself. If removing the `ci` key makes `.mcp.json` have NO top-level keys (impossible in practice — `mcpServers` stays), write it as `{}`. Do not delete the file.
+**Forge mismatch is treated as customization**: if the user runs `remove --forge gitlab` against a project whose `.mcp.json` was written by `setup --forge github`, the expected array differs and the canonical check fails. The warning fires, the entry is left alone, and `remove` still cleans up `state.json`. This is correct — the user probably made a mistake running the wrong forge flag, and we'd rather preserve the entry than blow it away.
+
+When the `ci` entry IS removed, the `.mcp.json` file is rewritten in canonical 2-space JSON with a trailing newline, same as setup does on write. If removing the `ci` key leaves `mcpServers` as an empty object `{}`, **leave the empty object** — do not delete the `mcpServers` key itself. Do not delete the file.
+
+**Defensive shape handling**: if `.mcp.json` is present but `mcp.mcpServers` is not an object (e.g., `null`, a string, an array), log `warning: .mcp.json mcpServers is not an object — skipping` and do not mutate the file. This mirrors the defensive behavior of setup's `const servers = mcp.mcpServers ?? {}` fallback, extended to reject non-object values explicitly.
 
 ### Codev revert rule
 
@@ -206,37 +215,72 @@ Wrap the whole Codev step in a local `try/catch` that logs a warning and **conti
 
 The log line for a Codev revert failure is: `[ci-channel] warning: Codev revert failed: <error message>. Other cleanup succeeded; edit .codev/config.json manually to remove --dangerously-load-development-channels server:ci from shell.architect.`
 
+### 404 handling (disambiguated)
+
+The forge-side webhook flow involves **two** distinct API calls that can return 404, and they must be handled differently:
+
+1. **LIST `/hooks` returns 404** (or HTTP_404 via `gh`/`glab` stderr): this means the **repo or project itself** is not found (or not visible with the current auth scope). This is a **hard failure** — it's the same 404 setup classifies as "Could not find repo '<repo>'". Exit 1 with the existing error message. Rationale: if we can't list hooks, we don't know whether our hook exists or not, and silently proceeding to delete state.json would orphan the webhook if it does exist.
+
+2. **DELETE `/hooks/{id}` returns 404**: this means the **webhook** is gone (race between list and delete — someone or something deleted it in between). This is **not an error**. Log `webhook <id> already deleted on <forge>; continuing` and proceed to the local cleanup. Rationale: the goal of the DELETE call is to ensure the webhook is gone, and it is gone, so the goal is met.
+
+**Implementation note**: the distinction hinges on which API call produced the 404. Two workable mechanisms:
+
+- **Option A**: `classifyForgeError` gets an additional `context: 'list' | 'delete'` parameter. On `context === 'delete'` + 404, return a sentinel `null`/`undefined` the caller interprets as "treat as success." On `context === 'list'` + 404, return the existing "Could not find repo" error.
+- **Option B**: `remove()` catches the DELETE-call error locally *before* calling `classifyForgeError`. Check if the thrown error's stderr contains `HTTP 404` or `Not Found`; if so, swallow it and log the "already deleted" line. Otherwise, rethrow through `classifyForgeError`.
+
+The plan phase picks one. Option B is slightly simpler (adds ~4 lines to `remove()` per forge branch, leaves `classifyForgeError` unchanged at current complexity). Option A is slightly cleaner (adds ~6 lines to `classifyForgeError`, centralized). Either is acceptable; the plan phase should just commit to one and note it in the Phase 1 acceptance criteria.
+
+For Gitea, the same distinction applies to `giteaFetch`: a 404 on the LIST call throws `Could not find Gitea repo '<repo>'` (existing behavior, keep), but a 404 on the DELETE call must be caught locally in `remove()` (since `giteaFetch` throws before the caller can inspect it). The plan phase should wrap the Gitea DELETE call in a try/catch that matches `err.message` against `"Could not find Gitea repo"` OR the status code — probably the simplest approach is to bypass `giteaFetch` for the DELETE call and do a direct `fetch()` with manual status handling (~8 lines). Alternatively, `giteaFetch` could grow a `context` parameter the same way Option A does for `classifyForgeError`. Plan phase decides.
+
 ### Idempotency
 
-Running `remove` after a successful remove:
-- `state.json` is gone → fail fast with `no ci-channel install detected in this project`. Exit 1.
+The rule is straightforward: **`state.json` is the single source of truth for "is ci-channel installed here?"**. Every remove behavior follows from that.
 
-Running `remove` against a forge where the webhook is already deleted (but `state.json` is still present — user deleted the hook manually):
-- List hooks, find no match → log `no matching webhook found on <forge>; skipping webhook delete` → continue.
+Running `remove` after a successful remove (state.json is gone):
+- Precondition check fails → fail fast with `no ci-channel install detected in this project`. Exit 1.
+- **This is NOT "idempotent exit-0" behavior.** It is "the second run correctly tells you nothing is installed." If the user wanted silent no-op on a re-run, they could check themselves — but a non-zero exit is more informative for scripts and for users who expect "did I really uninstall?".
+
+Running `remove` against a forge where the webhook is already deleted but `state.json` is still present (user deleted the hook manually, or a partial failure left state.json behind):
+- List hooks succeeds, find no match → log `no matching webhook found on <forge>; skipping webhook delete` → continue.
 - Delete `state.json`, revert `.mcp.json`, revert `.codev/config.json`, exit 0.
 
-Running `remove` after a partial failure (e.g., webhook delete succeeded, state.json delete failed, user re-runs):
-- List hooks, find no match (already deleted) → log "no matching webhook found" → continue.
+Running `remove` after a partial failure (webhook delete succeeded, state.json delete failed at unlink time, user re-runs):
+- List hooks succeeds, find no match (already deleted) → log "no matching webhook found" → continue.
 - Delete `state.json` → succeeds this time.
 - Continue with `.mcp.json` and `.codev/config.json` cleanup.
 - Exit 0.
 
 **Hard failures (exit 1 with classified error)**:
-- Forge API authentication failure (401).
-- Forge API permission denied (403).
-- Local file write failure (EACCES, EPERM) — bubbled through the top-level catch with the filename in the error.
-- **NOT** 404 on webhook delete (treated as "already gone", continue).
-- **NOT** missing `.mcp.json` / `.codev/config.json` / webhook match.
+- `state.json` missing, unreadable, malformed, or missing `smeeUrl` (see "Required vs optional preconditions").
+- Project root not found.
+- For Gitea: `GITEA_TOKEN` not set.
+- Forge API authentication failure (401) on either list or delete.
+- Forge API permission denied (403) on either list or delete.
+- **LIST** call returns 404 (repo/project not found).
+- Network error / timeout on the forge API call (surfaced through the existing error classifier).
+- Local file write failure on `.mcp.json` or `.codev/config.json` (EACCES, EPERM) — bubbled through the top-level catch with the filename in the error.
+
+**Soft handling (log and continue, exit 0)**:
+- **DELETE** call returns 404 (webhook was already gone — race between list and delete).
+- No matching webhook in the list response.
+- Missing `.mcp.json`.
+- Missing `ci` key in `.mcp.json`.
+- Non-canonical `ci` key in `.mcp.json` (leaves alone, warns).
+- `mcpServers` not an object.
+- Missing `.codev/config.json`.
+- Missing `shell.architect` in `.codev/config.json`.
+- Loader flag not present in `shell.architect`.
+- `unlinkSync(state.json)` throws `ENOENT` (race with another process).
 
 ### Order of operations
 
 The order matters because we're deleting the piece of state (`state.json`) that lets us identify the webhook. The correct order is:
 
 1. **Validate args** (parse, check forge-specific flags).
-2. **Find project root** (`findProjectRoot`).
-3. **Load `state.json`** — fail fast if missing. This gives us `smeeUrl` to match the webhook.
+2. **Find project root** (`findProjectRoot`) — fail fast if null.
+3. **Read and validate `state.json`** — fail fast if missing, unreadable, malformed, or missing `smeeUrl` (see "Required vs optional preconditions"). This gives us `smeeUrl` to match the webhook.
 4. **For Gitea only**: read `GITEA_TOKEN` from env or `.env` — fail fast if missing (same ordering as setup).
-5. **Delete the webhook on the forge** (by smeeUrl match). 404 during the match lookup or the DELETE call is not an error.
+5. **Delete the webhook on the forge** (list hooks, match by `smeeUrl`, delete). 404 on LIST is a hard failure (repo not found). 404 on DELETE is "already gone" (continue). No matching hook in the list is "already gone" (continue). See "404 handling" section.
 6. **Delete `state.json`** (unlink). If the file is gone between step 3 and step 6 (race with another process), `ENOENT` from unlink is not an error.
 7. **Remove canonical `ci` entry from `.mcp.json`** (or warn and skip if customized).
 8. **Revert `.codev/config.json`** (if present, if contains loader flag).
@@ -244,9 +288,7 @@ The order matters because we're deleting the piece of state (`state.json`) that 
 
 The key invariant: **step 5 happens before step 6**. If we deleted `state.json` first and then tried to delete the webhook, we'd have no way to match it and would have to either (a) list all hooks and try to guess which one is ours or (b) give up. Neither is acceptable.
 
-**Failure recovery note**: if step 5 fails (e.g., network error mid-DELETE), we exit 1 without touching anything else. The user's `state.json` is intact and re-running `remove` will retry. This is the "state-first ordering" principle from Spec 5/7, applied in reverse: for setup, state is written before network calls so a mid-install failure is recoverable. For remove, state is deleted after network calls so a mid-remove failure is recoverable. Both rules point at the same shape: `state.json` is the source of truth for what's installed, and the installer touches it last on the way in and last on the way out (after the network operation it gates).
-
-Wait — that's backwards. Let me re-read: for setup, state is written BEFORE the network call. For remove, state is deleted AFTER the network call. So the rule is "state.json exists iff the install is 'active' on the local side, regardless of network state." That's the right invariant.
+**Failure recovery note**: if step 5 fails (network error, 401, 403, 404-on-list), we exit 1 without touching anything else. The user's `state.json` is intact and re-running `remove` will retry the whole flow. Corollary invariant: **`state.json` exists iff the install is "active" on the local side, regardless of forge-side state.** Setup writes state before the network call (so a mid-setup failure leaves `state.json` present and re-runnable); remove deletes state after the network call succeeds (so a mid-remove failure also leaves `state.json` present and re-runnable). Both rules point at the same shape.
 
 ### Progress output
 
@@ -315,7 +357,7 @@ Tests reuse the Spec 7 patterns: PATH-override fake `gh`/`glab` for GitHub + Git
 ### Test budget
 
 - **Pre-existing tests (Spec 5 + Spec 7)**: 18 tests unchanged.
-- **New remove tests**: up to 10, targeting 8–9.
+- **New remove tests**: 9 mandatory (R1–R9) + 1 optional (R10). Max 10.
 - **Total cap**: 28.
 
 The ≤400 to ≤600 line bump mirrors the 300→400 bump on `lib/setup.ts`. The test file already uses the helpers efficiently; new remove tests reuse the same `mkFakeCli` / `withGiteaServer` / `runSetup` scaffolding with minimal duplication.
@@ -334,10 +376,10 @@ Windows: same rule as Spec 7. The fake-CLI tests skip on `win32`. The Gitea HTTP
 **Scenario R1 — GitHub remove happy path**:
 1. Seed `state.json` with fake `smeeUrl` + `webhookSecret`.
 2. Seed `.mcp.json` with the canonical GitHub `ci` entry (`{ command: 'npx', args: ['-y', 'ci-channel'] }`).
-3. Fake `gh` returns `[{ id: 42, config: { url: smeeUrl } }]` on list, `{}` on DELETE.
+3. Fake `gh` returns `[[{ id: 42, config: { url: smeeUrl } }]]` on list (nested array — matches setup's `gh api --paginate --slurp` response shape, which returns an array of pages that setup then `.flat()`s), `{}` on DELETE. If `remove` chooses to use a plain `gh api repos/.../hooks` (no `--paginate --slurp`) for simplicity, the fake should return `[{ id: 42, config: { url: smeeUrl } }]` instead. **The plan phase must pick one invocation shape and the test must match it.** Matching setup's `--paginate --slurp` pattern is recommended for consistency.
 4. Run `remove --repo owner/repo`.
 5. Assert:
-   - `gh api repos/owner/repo/hooks` called for list.
+   - `gh api ... repos/owner/repo/hooks` called for list (exact argv depends on `--paginate --slurp` choice).
    - `gh api --method DELETE repos/owner/repo/hooks/42` called for delete.
    - `state.json` no longer exists.
    - `.mcp.json` no longer contains the `ci` key (but still exists).
@@ -415,23 +457,32 @@ Windows: same rule as Spec 7. The fake-CLI tests skip on `win32`. The Gitea HTTP
    - `.codev/config.json` `shell.architect` is now `'claude --dangerously-skip-permissions'` (flag stripped with its leading space).
    - Stderr contains `Reverted .codev/config.json`.
 
-**Scenario R9 (OPTIONAL)** — Codev file with no loader flag:
+**Scenario R9 — 404-during-DELETE race (webhook deleted between list and delete)**:
 1. Seed `state.json` + canonical `.mcp.json`.
-2. Seed `.codev/config.json` with `{ shell: { architect: 'claude --dangerously-skip-permissions' } }` (no loader flag).
-3. Fake `gh` returns matching hook.
-4. Run `remove --repo owner/repo`.
-5. Assert:
-   - `.codev/config.json` byte-equal after.
-   - Stderr contains `does not load ci channel — nothing to revert`.
+2. Fake `gh` returns `[{ id: 42, config: { url: smeeUrl } }]` on list (hook appears to exist), but DELETE on `/hooks/42` returns exit code 1 with stderr containing `HTTP 404: Not Found`.
+3. Run `remove --repo owner/repo`.
+4. Assert:
+   - Stderr contains `already deleted` (or equivalent "treat as success" log from the 404-on-DELETE handler).
+   - `state.json` deleted (remove continued after the soft-404).
+   - `.mcp.json` cleaned.
+   - Exit code 0.
 
-**Scenario R10 (OPTIONAL)** — Running setup then remove, end-to-end round-trip:
-1. Start with a clean temp dir (no state, no .mcp.json, no .codev).
-2. Seed state.json + webhookSecret so `fetchSmeeChannel` is never called.
-3. Run `setup --repo owner/repo` with a fake `gh` that accepts create.
-4. Run `remove --repo owner/repo` with a fake `gh` that returns the created hook and accepts DELETE.
-5. Assert: after remove, `state.json` is gone, `.mcp.json` has no `ci` key, temp dir looks as it did before setup (modulo directories that setup creates: `.claude/channels/ci/` may still exist as an empty dir — acceptable).
+This scenario is **mandatory** — it locks in the distinction between list-404 (hard) and delete-404 (soft) that the spec calls out explicitly. Cheap to add since it reuses the R1 scaffolding with a different fake DELETE response.
 
-**Minimum coverage**: R1, R2, R3, R4, R5, R6, R7, R8 (8 tests) are mandatory. R9 and R10 are stretch. Total cap: 10. Below 8 is a REQUEST_CHANGES.
+**Scenario R10 — Invalid `state.json` (missing `smeeUrl`)**:
+1. Seed `state.json` with `{ "webhookSecret": "abc" }` (no `smeeUrl`).
+2. Seed canonical `.mcp.json`.
+3. Run `remove --repo owner/repo`.
+4. Assert:
+   - Exit code 1.
+   - Stderr contains `missing a 'smeeUrl' field`.
+   - **No fake-`gh` call recorded** (precondition fail-fast before network).
+   - **`.mcp.json` untouched** (precondition fail-fast before local mutation).
+   - **`state.json` still exists** (precondition fail-fast before unlink).
+
+This scenario is **optional** — it locks in the state.json validity rule but is less load-bearing than the others. Fold it into R4 if budget is tight (same fail-fast shape, different trigger).
+
+**Minimum coverage**: R1, R2, R3, R4, R5, R6, R7, R8, R9 (9 tests) are mandatory. R10 is stretch. Total cap: 10. Below 9 is a REQUEST_CHANGES.
 
 ### Test implementation hints (not rules)
 
