@@ -109,7 +109,7 @@ describe('integration: Gitea webhook pipeline', () => {
 
     const notif = mockMcp.notifications[0]
     assert.strictEqual(notif.method, 'notifications/claude/channel')
-    assert.ok(notif.params.content.includes('CI failure: CI on branch develop'))
+    assert.ok(notif.params.content.includes('failure: CI · develop'))
     assert.ok(notif.params.content.includes('waleedkadous'))
     assert.strictEqual(notif.params.meta.branch, 'develop')
     assert.strictEqual(notif.params.meta.conclusion, 'failure')

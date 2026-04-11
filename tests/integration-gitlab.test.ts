@@ -102,7 +102,7 @@ describe('integration: GitLab webhook pipeline', () => {
 
     const notif = mockMcp.notifications[0]
     assert.strictEqual(notif.method, 'notifications/claude/channel')
-    assert.ok(notif.params.content.includes('CI failed'))
+    assert.ok(notif.params.content.includes('failed:'))
     assert.ok(notif.params.content.includes('main'))
     assert.strictEqual(notif.params.meta.branch, 'main')
     assert.strictEqual(notif.params.meta.conclusion, 'failed')

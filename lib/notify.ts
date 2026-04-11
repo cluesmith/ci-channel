@@ -20,24 +20,42 @@ export function sanitize(input: string, maxLength: number): string {
   return result;
 }
 
+// Non-terminal states — for these we keep the line short (no commit info)
+// because a workflow just starting up doesn't need to identify a specific
+// commit; the user just wants to know CI is running.
+const NON_TERMINAL_STATES = new Set([
+  "requested",
+  "in_progress",
+  "queued",
+  "pending",
+  "waiting",
+]);
+
 export function formatNotification(
   event: WebhookEvent,
   failedJobs?: string[]
 ): ChannelNotification {
   const workflow = sanitize(event.workflowName, 200);
   const branch = sanitize(event.branch, 100);
-
   const conclusion = sanitize(event.conclusion, 50);
-  let content = `CI ${conclusion}: ${workflow} on branch ${branch}`;
-  if (event.commitMessage) {
-    const msg = sanitize(event.commitMessage.split("\n")[0], 200); // First line only
-    content += ` — commit "${msg}"`;
-    if (event.commitAuthor) {
-      const author = sanitize(event.commitAuthor, 100);
-      content += ` by ${author}`;
+
+  // Compact format: "<state>: <workflow> · <branch>" plus commit info on
+  // terminal states only. Drops the redundant "CI " prefix (channel source
+  // already says "ci:") and the "on branch " filler so more useful info
+  // fits inside the terminal width before truncation.
+  let content = `${conclusion}: ${workflow} · ${branch}`;
+
+  if (!NON_TERMINAL_STATES.has(conclusion)) {
+    if (event.commitMessage) {
+      const msg = sanitize(event.commitMessage.split("\n")[0], 200); // First line only
+      content += ` — ${msg}`;
+      if (event.commitAuthor) {
+        const author = sanitize(event.commitAuthor, 100);
+        content += ` by ${author}`;
+      }
+    } else {
+      content += ` — ${event.commitSha.slice(0, 8)}`;
     }
-  } else {
-    content += ` — commit ${event.commitSha.slice(0, 8)}`;
   }
 
   if (failedJobs && failedJobs.length > 0) {

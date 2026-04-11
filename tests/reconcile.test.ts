@@ -51,9 +51,9 @@ describe('reconciliation notification formatting', () => {
     }
 
     const notification = formatNotification(event)
-    assert.ok(notification.content.includes('CI failure: CI Validation on branch ci'))
+    assert.ok(notification.content.includes('failure: CI Validation · ci'))
     assert.ok(notification.content.includes('abc123'))
-    assert.ok(!notification.content.includes('by'))
+    assert.ok(!notification.content.includes(' by '))
   })
 
   test('reconciled event has correct meta attributes', () => {

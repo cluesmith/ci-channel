@@ -120,7 +120,7 @@ describe('integration: HTTP webhook pipeline', () => {
     assert.ok(mockMcp.notifications.length >= 1)
     const notif = mockMcp.notifications[0]
     assert.strictEqual(notif.method, 'notifications/claude/channel')
-    assert.ok(notif.params.content.includes('CI failure: CI Validation on branch ci'))
+    assert.ok(notif.params.content.includes('failure: CI Validation · ci'))
     assert.ok(notif.params.content.includes('waleedkadous'))
     assert.strictEqual(notif.params.meta.workflow, 'CI Validation')
     assert.strictEqual(notif.params.meta.branch, 'ci')

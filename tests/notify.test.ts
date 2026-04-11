@@ -67,7 +67,7 @@ describe('formatNotification', () => {
     const event = makeEvent()
     const notification = formatNotification(event)
 
-    assert.ok(notification.content.includes('CI failure: CI Validation on branch ci'))
+    assert.ok(notification.content.includes('failure: CI Validation · ci'))
     assert.ok(notification.content.includes('fix: widget alignment'))
     assert.ok(notification.content.includes('waleedkadous'))
   })
@@ -76,9 +76,20 @@ describe('formatNotification', () => {
     const event = makeEvent({ commitMessage: null, commitAuthor: null })
     const notification = formatNotification(event)
 
-    assert.ok(notification.content.includes('CI failure: CI Validation on branch ci'))
+    assert.ok(notification.content.includes('failure: CI Validation · ci'))
     assert.ok(notification.content.includes('abc123de')) // truncated SHA
-    assert.ok(!notification.content.includes('by'))
+    assert.ok(!notification.content.includes(' by '))
+  })
+
+  test('non-terminal states omit commit info to stay compact', () => {
+    const requested = formatNotification(makeEvent({ conclusion: 'requested' }))
+    assert.ok(requested.content.includes('requested: CI Validation · ci'))
+    assert.ok(!requested.content.includes('widget alignment'))
+    assert.ok(!requested.content.includes('waleedkadous'))
+
+    const inProgress = formatNotification(makeEvent({ conclusion: 'in_progress' }))
+    assert.ok(inProgress.content.includes('in_progress: CI Validation · ci'))
+    assert.ok(!inProgress.content.includes('widget alignment'))
   })
 
   test('formats event with commit message but no author', () => {

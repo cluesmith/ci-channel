@@ -140,7 +140,7 @@ describe('stdio lifecycle (regression for #457)', () => {
 
     assert.ok(notification !== undefined, 'Expected channel notification on stdout')
     const notifMsg = JSON.parse(notification!)
-    assert.ok(notifMsg.params.content.includes('CI failure'))
+    assert.ok(notifMsg.params.content.includes('failure'))
     assert.strictEqual(notifMsg.params.meta.workflow, 'CI Validation')
 
     // Step 5: Verify the connection is still alive by sending a ping
