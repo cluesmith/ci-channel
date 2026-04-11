@@ -1,0 +1,54 @@
+Implementation verified. Here's my review of the `impl` phase:
+
+## Review Summary
+
+### Spec Adherence ✓
+- **`lib/setup.ts`**: 293 lines (≤300 cap) — well within budget
+- **All three forge branches** implemented inline via `if/else if/else` — no strategy registry, no module split
+- **No new dependencies** — uses only Node built-ins + existing `lib/` imports
+- **`--forge` validation** matches spec verbatim: `Invalid --forge 'GitLab'. Must be one of: github, gitlab, gitea (lowercase).`
+- **`--gitea-url` required/forbidden** correctly enforced (both directions)
+- **GitLab uses PUT** for hook updates (line 229), URL-encodes the repo path via `encodeURIComponent` (line 210)
+- **Gitea update payload** correctly omits `type` field (line 257); create includes it (line 265)
+- **Gitea token precedence**: `process.env.GITEA_TOKEN` first, then `.env` file (line 154); empty string treated as missing via `.trim() || ...`
+- **Token check at step 3** happens before state provisioning (lines 150–158 before state write at 160+)
+- **State-first ordering preserved** on all three branches — conditional write on line 181 precedes any forge API call
+- **`.mcp.json`** uses `'ci' in servers` key-presence check (line 275)
+- **Codev integration** wrapped in local `try/catch` that logs and continues (lines 134–136); substring check + append pattern correct; canonical 2-space JSON on write
+- **Error classification** messages match spec text verbatim for GH/GLab/Gitea 404/403/401/ENOENT
+- **Gitea fetch**: `AbortController` 10s timeout; GET uses only `Authorization`, POST/PATCH use both `Authorization` + `Content-Type: application/json`
+- **`readEnvToken` helper** handles `export`, quoted values, comments, blank lines
+
+### Plan Alignment ✓
+- `lib/setup.ts` modified — 293 lines
+- `tests/setup.test.ts`: Scenario 8 correctly rewritten to use `--nonsense` (lines 194–196); test count unchanged at 8 (Phase 2 will add new scenarios)
+- `package.json` → 0.4.0, `package-lock.json` → 0.4.0 at both version fields
+- README / INSTALL / CLAUDE / AGENTS / `codev/resources/arch.md` all updated
+- CLAUDE.md and AGENTS.md installation sections are in sync
+- `server.ts` unchanged
+
+### Code Quality ✓
+- Replaced `GhError` class with shared `classifyForgeError` helper — fallback branch correctly reconstructs message from `{bin, args, code, stderr}` (no `[object Object]` bug)
+- `cliApi` helper generalizes `ghApi` for both `gh` and `glab`
+- `giteaFetch` helper handles timeout + status-based error classification
+- `codevIntegrate` is sync (file ops are sync anyway) — simpler than the plan's async sketch, same behavior
+
+### Build & Test ✓
+- `npm run build` succeeds
+- `npm test`: 181 tests pass, 0 failures (baseline preserved — 8 setup tests including the modified Scenario 8)
+
+### Phase Scope Check ✓
+Phase 1 (impl) was explicitly: extend `lib/setup.ts` + docs + version bump + Scenario 8 edit. Phase 2 (tests) is where new test scenarios land. The absence of new test scenarios in Phase 1 is correct and matches the plan.
+
+### Minor observations (non-blocking)
+- The `unchanged` check on line 178 uses `Object.keys(existing).length === 2` which assumes `loadState` only returns `webhookSecret`/`smeeUrl`. This is true today but creates a coupling. Not a blocker.
+- Live smoke test (`ci-channel setup --forge gitlab ...` against a real project) hasn't been run, but the spec explicitly marks it non-required and Phase 2's fake-CLI tests will cover the code paths.
+
+---
+VERDICT: APPROVE
+SUMMARY: Phase 1 implementation hits all hard constraints (293/300 lines), matches the spec verbatim on every checklist item, passes all existing tests, and correctly defers new test scenarios to Phase 2.
+CONFIDENCE: HIGH
+---
+
+KEY_ISSUES:
+- None

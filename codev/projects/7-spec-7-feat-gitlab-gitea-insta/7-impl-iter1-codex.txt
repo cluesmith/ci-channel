@@ -1,0 +1,18 @@
+I’ll review this as the Phase `impl` gate only: implementation, docs/version, and the Scenario 8 test edit. I’m going to read the actual files from disk and check the hard review gates before looking for behavioral issues.The size and forbidden-pattern checks pass at first glance: `lib/setup.ts` is 293 lines, `tests/setup.test.ts` is still 198 lines with 8 tests, and no forbidden helper directories or dependency patterns showed up. Next I’m reading the implementation and the docs touched in this phase.The implementation is mostly aligned with the phase shape, but I’ve found one spec-level validation gap in `lib/setup.ts`: `--gitea-url` is accepted without checking for an `http://` or `https://` prefix. I’m continuing through the docs and metadata now so the final review isn’t based on code alone.Docs/version are present and the Phase 1 test edit is exactly the planned `--nonsense` change. I’m doing one compile-only check now; `npm run build` writes `dist/`, so in this read-only sandbox I’m using `tsc --noEmit` instead.`npx tsc --noEmit` passes. I’m going to run the setup test file in isolation; that exercises the only Phase 1 test edit plus the GitHub regression path without writing build output.The isolated setup tests couldn’t run in this environment because the read-only sandbox denies `mkdtemp` under the system temp directory; the only passing case was the one that doesn’t create temp files. That’s an environment limitation, not a test result I’d count against the implementation.**Findings**
+
+1. [lib/setup.ts](/Users/mwk/Development/cluesmith/ci-channel/.builders/aspir-7-spec-7-feat-gitlab-gitea-insta/lib/setup.ts):35  
+   `--gitea-url` is required for Gitea, but it is not validated to start with `http://` or `https://`. The spec explicitly requires validating exactly that much: accept with/without trailing slash, but require an HTTP(S) prefix and let `fetch` handle other malformed URL details. As written, `--forge gitea --gitea-url gitea.example.com` proceeds to token/state provisioning and later fails through `fetch`, instead of failing during CLI validation. This is a spec-adherence gap for Phase `impl`.
+
+**Notes**
+
+The main hard gates otherwise look good: `lib/setup.ts` is 293 lines, `tests/setup.test.ts` is 198 lines with 8 tests, no `lib/setup/` or forbidden dependency/prompt/DI patterns are present, GitLab uses `PUT`, Gitea update omits `type`, state-first ordering is preserved after the Gitea token check, `.mcp.json` uses key-presence, and package/package-lock are both `0.4.0`.
+
+Validation run: `npx tsc --noEmit` passed. I attempted `node --import tsx/esm --test tests/setup.test.ts`, but the read-only sandbox denied `mkdtemp` in the system temp directory, so 7 tests failed with `EPERM` before exercising the code. I would not count that as an implementation failure.
+
+---
+VERDICT: REQUEST_CHANGES
+SUMMARY: Implementation is largely aligned, but Gitea URL scheme validation required by the spec is missing.
+CONFIDENCE: HIGH
+---
+
+KEY_ISSUES: Missing `http://` / `https://` validation for `--gitea-url` in Phase `impl`.
