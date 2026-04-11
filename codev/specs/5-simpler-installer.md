@@ -106,34 +106,68 @@ If a matching webhook exists at the expected smee URL, **always PATCH it** with 
 
 ### State-First Ordering
 
-Write state.json BEFORE the webhook API call, on both create and PATCH paths. This prevents orphan webhooks on partial failure.
+Write state.json BEFORE the webhook API call (both POST/create and PATCH/update paths). On an idempotent re-run where state is already on disk, the write still happens (unconditional); the bytes are identical so disk contents don't change. This ordering prevents orphan webhooks on partial failure: if the `gh` call fails, the secret/URL used are already persisted and the user can re-run to recover.
 
 ### Required Behaviors
 
 These must be in the 150-line budget:
 
-1. **Walk up from `process.cwd()` to find a project root** (reuse `findProjectRoot` from `lib/project-root.ts`)
-2. **Load existing state.json** if present (reuse `loadState` from `lib/state.ts`), else start empty
+1. **Walk up from `process.cwd()` to find a project root** (reuse `findProjectRoot` from `lib/project-root.ts`). If it returns `null`, throw.
+2. **Load existing state.json** if present (reuse `loadState(path)` from `lib/state.ts`, passing the project-scoped path), else start empty
 3. **Generate webhook secret** via `crypto.randomBytes(32).toString('hex')` if state lacks one
-4. **Fetch smee.io channel URL** via `fetchSmeeChannel` from `lib/bootstrap.ts` if state lacks one
-5. **Write state.json** with `mode: 0o600` in a single `writeFileSync` call (no separate chmod)
-6. **List hooks** via `spawn('gh', ['api', '--paginate', '--slurp', 'repos/OWNER/REPO/hooks'])`
-7. **Create or PATCH hook** via `spawn('gh', ['api', ...])`, piping the JSON payload via stdin (use `stdio: ['pipe', 'pipe', 'pipe']` — don't inherit `process.stdin`)
-8. **Merge .mcp.json** — read, parse, add `mcpServers.ci` if absent, write. Let `JSON.parse` throw on bad JSON.
-9. **Print the next-steps message** and exit
+4. **Fetch smee.io channel URL** via `fetchSmeeChannel` from `lib/bootstrap.ts` if state lacks one. If it returns `null`, throw `new Error('Failed to provision smee.io channel')`.
+5. **Write state.json** unconditionally with `mode: 0o600` in a single `writeFileSync` call (no separate chmod). On idempotent re-runs the contents happen to be identical; this is fine — the file is rewritten with the same bytes. Do NOT add a "skip write if unchanged" optimization.
+6. **List hooks** via `spawn('gh', ['api', '--paginate', '--slurp', 'repos/OWNER/REPO/hooks'])`. `--slurp` returns a JSON array of pages (an array of arrays); flatten with `.flat()` before searching.
+7. **Match existing hook** by `h.config?.url === state.smeeUrl`. If multiple match, take the first. If one matches, PATCH it via `spawn('gh', ['api', '--method', 'PATCH', 'repos/OWNER/REPO/hooks/:id', '--input', '-'])`. Otherwise CREATE via `spawn('gh', ['api', '--method', 'POST', 'repos/OWNER/REPO/hooks', '--input', '-'])`. In both cases pipe the canonical payload JSON via stdin (use `stdio: ['pipe', 'pipe', 'pipe']` — don't inherit `process.stdin`).
+8. **Merge .mcp.json** — if the file exists, read and `JSON.parse` it (let parse errors throw naturally); if it does not exist, start from `{}`. Ensure `mcpServers.ci` equals the canonical entry below; if absent or different, set it. Write back with 2-space indent + trailing newline.
+9. **Print the next-steps message** to stdout and return/exit 0
+10. **Error handling**: a single top-level `try/catch` inside `setup()`. On any thrown error, print `[ci-channel] setup failed: <message>` to stderr and `process.exit(1)`. Let `gh` subprocess non-zero exits, ENOENT (gh not installed), `JSON.parse` errors, and `findProjectRoot` nulls all flow through this one catch — no special-casing.
+
+### Canonical Payloads (use these exact shapes)
+
+**Webhook payload** (for both POST create and PATCH update):
+```json
+{
+  "config": {
+    "url": "<state.smeeUrl>",
+    "content_type": "json",
+    "secret": "<state.webhookSecret>"
+  },
+  "events": ["workflow_run"],
+  "active": true
+}
+```
+
+**`.mcp.json` `ci` entry** (identical to `INSTALL.md:17`):
+```json
+{"command": "npx", "args": ["-y", "ci-channel"]}
+```
+
+A re-run must only rewrite `.mcp.json` if the existing `ci` entry is missing or not deep-equal to the canonical entry above. If `.mcp.json` has other servers under `mcpServers`, they must be preserved verbatim.
 
 ## Test Scenarios (ALL in one file, ≤8 total)
 
-Tests use real temp directories (via `fs.mkdtempSync`). Mock only `spawn` — intercept `gh` calls and return canned responses. Everything else is real fs.
+Tests use real temp directories (via `fs.mkdtempSync`) and a real file system. The production code is run unmodified.
 
-1. **Happy path fresh install**: no state.json, no hook, no .mcp.json → all three created with expected contents. Verify state.json mode is 0o600 (skip on win32).
-2. **Idempotent re-run**: state.json already correct, hook already present with matching URL, .mcp.json has `ci` entry → PATCH called once (always-PATCH), state.json not rewritten, .mcp.json unchanged.
-3. **Re-run with existing hook, missing state.json**: PATCH called with freshly generated secret, state.json created with that secret.
-4. **Re-run with existing .mcp.json that has other servers**: `ci` merged in; `other-server` preserved.
-5. **CREATE failure**: mock `spawn` to make `gh api POST` exit non-zero → verify state.json was written BEFORE the POST attempt.
-6. **Project root from subdirectory**: run from `<tmp>/src/foo/` with `.git/` at `<tmp>/` → state/mcp-json written at `<tmp>/.claude/...` and `<tmp>/.mcp.json`.
-7. **No project root**: run from a directory with no `.git/` or `.mcp.json` anywhere → error exit with clear message.
-8. **Missing `--repo`**: run without `--repo` → error exit with usage message.
+### Test Mocking Strategy (no DI)
+
+Two external things need to be controlled in tests:
+
+1. **`gh` CLI** — use the **PATH-override pattern**. Each test writes a fake `gh` executable to a temp bin directory and prepends that directory to `process.env.PATH` for the duration of the test (restored in a `try/finally` or `after` hook). The fake `gh` is a POSIX shell script that (a) captures its argv + stdin into a log file inside the test's temp dir and (b) prints a canned JSON response to stdout, optionally exiting non-zero. Tests inspect the log file to assert what `gh` was called with and in what order. `lib/setup.ts` itself calls `spawn('gh', …)` with no env override; the fake on PATH wins.
+2. **`fetchSmeeChannel`** — stub `globalThis.fetch` for the duration of the test so `fetchSmeeChannel` does not make a real network call. This is an **explicit permitted exception** to the "only gh is faked" rule because `fetchSmeeChannel` is reused unchanged from `lib/bootstrap.ts` and the alternative (pre-seeding every test's state.json) would miss the fresh-install path. The stub returns a synthetic 302 response with a `location: https://smee.io/<test-channel>` header to keep `fetchSmeeChannel` on its happy path.
+
+No other mocking is allowed. No `vi.mock`, no `mock.module`, no module-level indirection in `lib/setup.ts` for testability. On Windows, the PATH-override + fake-shell-script approach does not work; tests that require a fake `gh` are skipped when `process.platform === 'win32'`.
+
+### Scenarios (8 max)
+
+1. **Happy path fresh install**: no state.json, no hook, no .mcp.json → state.json, webhook (via `gh api POST`), and .mcp.json all created with expected contents. Verify state.json mode is `0o600` (skip the mode assertion on win32).
+2. **Idempotent re-run**: state.json present with valid `webhookSecret` + `smeeUrl`, `gh` list returns one hook whose `config.url` matches state.smeeUrl, .mcp.json already has the canonical `ci` entry → `gh api PATCH` is called exactly once (always-PATCH rule), state.json file **contents** are unchanged (mtime may change — the assertion is byte-equality of contents, not file-not-rewritten), .mcp.json is left with byte-equal contents.
+3. **State present, webhook missing**: state.json has both fields, `gh` list returns `[]` (no existing hook), .mcp.json already has the canonical `ci` entry → `gh api POST` is called (CREATE, not PATCH) using the existing state's secret and URL; state.json contents unchanged; .mcp.json unchanged. This exercises the load-state path and confirms CREATE is used when no matching hook exists.
+4. **Re-run with existing `.mcp.json` that has other servers**: .mcp.json contains `mcpServers: { "other": {...} }`, state.json is fresh → after setup, .mcp.json contains both `other` (unchanged) and the canonical `ci` entry.
+5. **CREATE failure (state-first ordering)**: fake `gh` returns `[]` for the list call, then exits non-zero on the POST call → `setup()` rejects/exits non-zero, and state.json **has been written to disk before the POST attempt**. Assertion: read state.json from disk after `setup()` returns; it must exist and contain the generated secret + smee URL. This is the single most important test — it locks in the state-first ordering that prevents orphan webhooks.
+6. **Project root from subdirectory**: create `<tmp>/.git/`, run `setup` with `process.chdir(<tmp>/src/foo/)` → state.json is written to `<tmp>/.claude/channels/ci/state.json` and `.mcp.json` is written to `<tmp>/.mcp.json`. (Restore `process.cwd()` in a `finally`.)
+7. **No project root**: run from a directory with no `.git/` or `.mcp.json` anywhere in ancestry → `setup()` exits non-zero with an error message mentioning "project root" on stderr.
+8. **Missing `--repo`**: run `setup([])` → exits non-zero with a usage message on stderr that mentions `--repo`.
 
 ## Dispatch Integration
 
@@ -211,3 +245,27 @@ A PR that:
 - Passes the existing 291 tests unchanged
 - Is reviewable in one sitting
 - Ships in one iteration (or two at most)
+
+## Consultation Log
+
+### Specify iteration 1 (Codex, Gemini, Claude)
+
+All three reviewers ran on the pre-committed spec. Codex and Gemini returned REQUEST_CHANGES; Claude returned COMMENT. Every concern was a gap-fill, not a complexity-add; the tight constraint set was endorsed.
+
+Changes made in response:
+
+- **Canonical payloads embedded verbatim** (webhook JSON + `.mcp.json` `ci` entry). Previously the spec said "canonical payload" without showing it. Raised by all three reviewers.
+- **`.mcp.json` creation path** clarified — if the file is absent (project root found via `.git/`), start from `{}` and write. Raised by Claude.
+- **`fetchSmeeChannel` null handling** specified: throw `Error('Failed to provision smee.io channel')` which the top-level catch turns into a non-zero exit. Raised by Codex and Claude.
+- **Error propagation** spelled out: single `try/catch` inside `setup()`, all errors (gh non-zero, ENOENT, JSON.parse, findProjectRoot null) flow through it. Raised by Codex and Claude.
+- **Test mocking strategy** explicitly endorsed: PATH-override fake `gh` (unix only, skip on win32) + `globalThis.fetch` stub as the one permitted fetch exception. Raised by all three reviewers — the original "only mock spawn" rule was unworkable against ESM namespace imports and against `fetchSmeeChannel`'s real network call.
+- **Scenario 3 rewritten** from the contradictory "existing hook, missing state.json" (a newly fetched smee URL cannot match an existing hook created from a prior different URL) to "state present, webhook missing → CREATE called using existing state; state-first ordering preserved." This tests the load-state path without creating a logical impossibility. Raised by Codex and Gemini.
+- **Scenario 2 assertion wording** tightened from "state.json not rewritten" to "state.json **contents** unchanged (byte-equality; mtime may differ)." This keeps the write unconditional (no "skip if unchanged" fast path) while still asserting idempotency. Raised by Claude.
+- **`gh api --paginate --slurp` output shape** clarified: returns a JSON array of pages; flatten with `.flat()`. Raised by Codex.
+- **Webhook matching rule** made explicit: `h.config?.url === state.smeeUrl`, take first if multiple. Raised by Codex and Claude.
+
+Not changed (explicitly rejected):
+
+- **`--repo` regex validation** (Claude suggested `^[\w.-]+/[\w.-]+$`). Rejected — the spec's spirit is "no needless defensive validation"; a malformed `--repo` produces a perfectly comprehensible `gh` error, and a regex is one more line in a 150-line budget.
+- **Complex smee URL adoption logic** (Gemini suggested: list hooks first, adopt any existing smee.io URL, then skip `fetchSmeeChannel`). Rejected — this is a fast-path optimization exactly like the "skip if webhook correct" trap from Spec 3. Scenario 3 rewrite removes the motivation.
+- **Anything adding new modules, DI, or interfaces** — all three reviewers were careful to stay inside the constraint set; no such suggestions were made.
