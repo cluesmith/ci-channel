@@ -296,8 +296,12 @@ describe('runInstall — webhook secret freshness vs existing hook (silent-HMAC-
     assert.equal(calls.ghUpdateHookLastArg?.hookId, 7)
   })
 
-  test('idempotent happy path: state intact + matching hook → skip (no update)', async () => {
-    // Sanity check that the normal idempotent re-run still skips.
+  test('iter5 — idempotent re-run: state intact + matching hook → PATCH (no skip path anymore)', async () => {
+    // iter5 structural fix: the skip path was removed entirely after
+    // four iterations of finding silent-failure modes in it. Now we
+    // always PATCH when a matching hook exists, reconciling it to the
+    // canonical ci-channel config. State.json is still unchanged (no
+    // writeState call), but the webhook is always reconciled.
     const { deps, io, calls } = buildMockDepsAndIo({
       existingState: {
         webhookSecret: 'existing-secret',
@@ -311,8 +315,13 @@ describe('runInstall — webhook secret freshness vs existing hook (silent-HMAC-
     await runInstall(baseArgs(), deps, io)
 
     assert.equal(calls.generateSecretCalls, 0)
+    assert.equal(calls.fetchSmeeCalls, 0)
     assert.equal(calls.ghCreateHookCalls, 0)
-    assert.equal(calls.ghUpdateHookCalls, 0) // skip, not update
+    // iter5: always PATCH, no skip path.
+    assert.equal(calls.ghUpdateHookCalls, 1)
+    assert.equal(calls.ghUpdateHookLastArg?.hookId, 99)
+    // State.json is still unchanged (stateDiffers returns false).
+    assert.equal(calls.writeStateCalls, 0)
   })
 
   test('fresh secret + matching hook without id → fail fast', async () => {
@@ -357,16 +366,16 @@ describe('runInstall — webhook secret freshness vs existing hook (silent-HMAC-
       ],
     })
 
-    // Mock Io that declines the PATCH confirmation.
+    // Mock Io that declines the reconcile confirmation.
     let confirmCount = 0
     const decliningIo: Io = {
       info: () => {},
       warn: () => {},
       confirm: async (message: string) => {
         confirmCount++
-        // First and only prompt reached in this scenario is the
-        // "Update existing webhook?" — decline it.
-        assert.match(message, /Update existing webhook/)
+        // iter5: the prompt is "Reconcile existing webhook ...?"
+        // (was "Update existing webhook..." in iter4).
+        assert.match(message, /Reconcile existing webhook/)
         return false
       },
       prompt: async () => {
@@ -380,7 +389,7 @@ describe('runInstall — webhook secret freshness vs existing hook (silent-HMAC-
       () => runInstall(args, deps, decliningIo),
       (err: UserDeclinedError) =>
         err instanceof UserDeclinedError &&
-        err.userMessage.includes('updating webhook secret') &&
+        err.userMessage.includes('reconciling webhook') &&
         err.exitCode === 0,
     )
 
@@ -487,9 +496,10 @@ describe('runInstall — webhook secret freshness vs existing hook (silent-HMAC-
     assert.equal(overrideWarnings.length, 1)
   })
 
-  test('case H (iter4): --smee-url matches stored URL + matching hook → skip (idempotent happy path)', async () => {
-    // Sanity check: when the stored pair matches the CLI override and
-    // the hook exists, we still skip. No regression.
+  test('case H (iter5): --smee-url matches stored URL + matching hook → PATCH (no skip path)', async () => {
+    // In iter4 this test asserted skip. In iter5 the skip path was
+    // removed entirely for correctness (see orchestrator.ts field
+    // audit comment), so this now asserts PATCH.
     const { deps, io, calls } = buildMockDepsAndIo({
       existingState: {
         webhookSecret: 'stored-secret',
@@ -506,7 +516,8 @@ describe('runInstall — webhook secret freshness vs existing hook (silent-HMAC-
     await runInstall(args, deps, io)
 
     assert.equal(calls.ghCreateHookCalls, 0)
-    assert.equal(calls.ghUpdateHookCalls, 0) // skip, not PATCH
+    assert.equal(calls.ghUpdateHookCalls, 1) // iter5: always reconcile
+    assert.equal(calls.ghUpdateHookLastArg?.hookId, 1)
   })
 
   test('multiple hooks at same URL → warn and reconcile only the first', async () => {
@@ -534,7 +545,125 @@ describe('runInstall — webhook secret freshness vs existing hook (silent-HMAC-
     assert.equal(calls.ghUpdateHookLastArg?.hookId, 10)
   })
 
-  test('dry-run: fresh secret + matching hook → logs "would update", no call', async () => {
+  test('iter5 regression: matching hook with active:false → PATCH (would have been silently skipped in iter4)', async () => {
+    // Codex iter4 bug: the tightened skip condition still trusted the
+    // existing hook's OTHER fields. A hook with active:false at the
+    // matching URL would be skipped, and no events would ever arrive.
+    // iter5 removes the skip path entirely, so active:false is
+    // reconciled to active:true on every run.
+    const { deps, io, calls } = buildMockDepsAndIo({
+      existingState: {
+        webhookSecret: 'stored-secret',
+        smeeUrl: 'https://smee.io/disabled',
+      },
+      ghHooks: [
+        {
+          id: 50,
+          active: false, // user (or someone) disabled it
+          config: { url: 'https://smee.io/disabled' },
+        },
+      ],
+    })
+
+    await runInstall(baseArgs(), deps, io)
+
+    assert.equal(calls.ghUpdateHookCalls, 1)
+    const payload = calls.ghUpdateHookLastArg?.payload as { active: boolean }
+    assert.equal(payload.active, true) // re-enabled by the PATCH
+  })
+
+  test('iter5 regression: matching hook with wrong events → PATCH resets to ["workflow_run"]', async () => {
+    // A hook at our URL but with events:["push"] would skip in iter4
+    // and silently fail to deliver workflow_run events.
+    const { deps, io, calls } = buildMockDepsAndIo({
+      existingState: {
+        webhookSecret: 'stored-secret',
+        smeeUrl: 'https://smee.io/wrong-events',
+      },
+      ghHooks: [
+        {
+          id: 60,
+          events: ['push'], // WRONG — no workflow_run
+          config: { url: 'https://smee.io/wrong-events' },
+        },
+      ],
+    })
+
+    await runInstall(baseArgs(), deps, io)
+
+    assert.equal(calls.ghUpdateHookCalls, 1)
+    const payload = calls.ghUpdateHookLastArg?.payload as {
+      events: string[]
+    }
+    assert.deepEqual(payload.events, ['workflow_run'])
+  })
+
+  test('iter5 regression: matching hook with wrong content_type → PATCH resets to "json"', async () => {
+    // A hook at our URL but with content_type:"form" would skip in
+    // iter4; our HMAC signature validation expects JSON-encoded
+    // bodies, so form-encoded bodies would fail validation.
+    const { deps, io, calls } = buildMockDepsAndIo({
+      existingState: {
+        webhookSecret: 'stored-secret',
+        smeeUrl: 'https://smee.io/wrong-ct',
+      },
+      ghHooks: [
+        {
+          id: 70,
+          config: {
+            url: 'https://smee.io/wrong-ct',
+            content_type: 'form', // WRONG
+          },
+        },
+      ],
+    })
+
+    await runInstall(baseArgs(), deps, io)
+
+    assert.equal(calls.ghUpdateHookCalls, 1)
+    const payload = calls.ghUpdateHookLastArg?.payload as {
+      config: { content_type: string }
+    }
+    assert.equal(payload.config.content_type, 'json')
+  })
+
+  test('iter5 regression: PATCH payload sets insecure_ssl="0" explicitly', async () => {
+    // The field audit sets insecure_ssl explicitly to avoid
+    // depending on GitHub's "replace vs merge" config semantics.
+    const { deps, io, calls } = buildMockDepsAndIo({
+      existingState: {
+        webhookSecret: 'stored-secret',
+        smeeUrl: 'https://smee.io/ssl',
+      },
+      ghHooks: [{ id: 80, config: { url: 'https://smee.io/ssl' } }],
+    })
+
+    await runInstall(baseArgs(), deps, io)
+
+    assert.equal(calls.ghUpdateHookCalls, 1)
+    const payload = calls.ghUpdateHookLastArg?.payload as {
+      config: { insecure_ssl: string }
+    }
+    assert.equal(payload.config.insecure_ssl, '0')
+  })
+
+  test('iter5 regression: CREATE payload also sets insecure_ssl="0" explicitly', async () => {
+    // Parity check: the create path also locks insecure_ssl to "0".
+    const { deps, io, calls } = buildMockDepsAndIo({
+      existingState: {},
+      ghHooks: [],
+    })
+
+    await runInstall(baseArgs(), deps, io)
+
+    assert.equal(calls.ghCreateHookCalls, 1)
+    const payload = calls.ghCreateHookLastArg?.payload as {
+      config: { insecure_ssl: string }
+    }
+    assert.equal(payload.config.insecure_ssl, '0')
+  })
+
+  test('dry-run: matching hook → logs "would reconcile", no call', async () => {
     const args = baseArgs()
     args.dryRun = true
     const { deps, io, calls } = buildMockDepsAndIo({
@@ -552,9 +681,10 @@ describe('runInstall — webhook secret freshness vs existing hook (silent-HMAC-
     assert.equal(calls.generateSecretCalls, 0)
     assert.equal(calls.ghCreateHookCalls, 0)
     assert.equal(calls.ghUpdateHookCalls, 0)
-    // But the output should mention the planned update.
+    // iter5: prompt/log wording changed from "update" to "reconcile"
+    // when the skip path was removed.
     const joined = calls.info.join('\n')
-    assert.match(joined, /\[dry-run\] Would update existing webhook/)
+    assert.match(joined, /\[dry-run\] Would reconcile existing webhook/)
   })
 })
 

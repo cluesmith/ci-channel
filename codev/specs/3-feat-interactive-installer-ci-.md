@@ -249,11 +249,25 @@ The installer has two overlapping concepts: **reuse** (re-run on existing state,
 | `--smee-url URL` passed, state.json has no smeeUrl | Use the CLI-provided URL, write it into state.json. No override — the stored value was absent. |
 | `--smee-url URL` passed, state.json has a **matching** smeeUrl | No-op for smeeUrl; continue with webhook idempotency on the matching URL. |
 | `--smee-url URL` passed, state.json has a **different** smeeUrl | **Explicit override**: honor the CLI value, update state.json to the new URL, and proceed with webhook creation for the new URL. This *will* create a new webhook (the existing webhook for the old URL is left in place — not deleted). The webhook secret is **not** regenerated; the installer reuses the existing `webhookSecret` from state.json for the new webhook. Emit a warning: `Overriding smeeUrl in state.json (old: ..., new: ...). Existing webhook for the old URL is left in place; delete it manually if no longer needed.` |
-| Webhook already exists for our smee URL **and** the current `{webhookSecret, smeeUrl}` pair was stored together in `existingState` (i.e., `existingState.webhookSecret` is present AND `existingState.smeeUrl === expectedSmeeUrl`) | Skip step 7 — the stored pair proves the hook was created by a previous successful run of this installer with the exact secret we still have. This is the only safe skip condition. |
-| Webhook already exists for our smee URL **but** the secret was freshly generated in this run (state.json was missing or had no `webhookSecret`) | **PATCH** the existing hook via `gh api --method PATCH repos/{repo}/hooks/{id}` to rotate it to the fresh secret. Without this, the hook would keep signing with a secret nobody has anymore, and the runtime would fail HMAC validation on every event — a silent broken install. |
-| Webhook already exists for our smee URL **but** the URL came from `--smee-url` and was NOT in stored state (`existingState.smeeUrl` was absent or differed from the current URL) | **PATCH** the existing hook. The secret currently stored was paired with some other URL (or nothing), so the hook at the CLI-provided URL was almost certainly created with a different secret. The skip condition explicitly requires `existingState.smeeUrl === expectedSmeeUrl`. |
-| Multiple webhooks point at our smee URL (user has duplicates) | Warn the user with a count and the first hook's id. Reconcile only the first (PATCH or skip based on the rules above). Leave the duplicates untouched — user should delete them manually. |
+| Webhook already exists for our smee URL (any condition) | **Always PATCH** the existing hook via `gh api --method PATCH repos/{repo}/hooks/{id}` with the canonical ci-channel config (url, content_type=json, secret, insecure_ssl=0, events=['workflow_run'], active=true). There is NO skip path. See the "webhook reconciliation model" note below for the rationale. |
+| Multiple webhooks point at our smee URL (user has duplicates) | Warn the user with a count and the first hook's id. PATCH only the first; leave the duplicates untouched (user should delete them manually). |
 | Webhook exists for a *different* smee URL | Ignore it; proceed with step 7 (user may have multiple relays). Do not delete any existing webhook. |
+
+**Webhook reconciliation model**: After four PR-review iterations finding silent-failure modes in the skip path (secret-not-rotated when state deleted; state-persisted-before-webhook race; URL-mismatch skip; active=false/wrong-events/wrong-content_type skip), the skip path was removed entirely in iter5. The installer now always PATCHes an existing hook with the canonical ci-channel config whenever a matching URL is found. The cost is one extra API call per re-run; the benefit is eliminating an entire class of bug by construction.
+
+**Webhook payload audit** (canonical shape sent in both CREATE and PATCH):
+
+| Field | Value | Rationale |
+|-------|-------|-----------|
+| `config.url` | expectedSmeeUrl | Destination — must match runtime's webhook endpoint |
+| `config.content_type` | `"json"` | Signature validation depends on JSON body encoding |
+| `config.secret` | state.webhookSecret | HMAC key. Write-only on GitHub — cannot read-and-compare |
+| `config.insecure_ssl` | `"0"` | Strict TLS. Set explicitly to avoid GitHub's ambiguous config-replace semantics |
+| `events` | `["workflow_run"]` | The only event ci-channel handles. Installer owns the hook; user additions are intentionally clobbered |
+| `active` | `true` | Disabled hook = no events delivered |
+| `name` | (not set) | Read-only on PATCH, GitHub always uses `"web"` |
+| `add_events` / `remove_events` | (not set) | We use `events` for auditability (exact set after PATCH) |
+| `config.token`, `config.digest` | (not set) | Unused auth mode / deprecated field |
 | `.mcp.json` exists with `mcpServers.ci` entry | Skip step 8. Warn the user the entry is already present (show the current value). |
 | `.mcp.json` exists without `mcpServers.ci` | Merge a new entry in, preserving all other servers. |
 | `.mcp.json` does not exist | Create it with just the `ci` entry. |

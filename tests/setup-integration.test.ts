@@ -311,9 +311,9 @@ describe('setup integration (real fs)', () => {
       info: () => {},
       warn: () => {},
       confirm: async (message: string) => {
-        // The only prompt the orchestrator reaches in this scenario
-        // is "Update existing webhook..." — decline it.
-        if (message.includes('Update existing webhook')) return false
+        // iter5: the prompt is "Reconcile existing webhook ...?"
+        // (was "Update existing webhook..." in iter4). Decline it.
+        if (message.includes('Reconcile existing webhook')) return false
         return true
       },
       prompt: async () => {

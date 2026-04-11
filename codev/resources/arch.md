@@ -159,21 +159,15 @@ runSetup(argv)
         ├── ghListHooks(repo) → scan for matching smee URL
         ├── warn if multiple hooks point at the same URL
         ├── ── webhook reconciliation FIRST (before state write) ──
-        │   canSafelySkip = matchingHook
-        │                   && existingState.webhookSecret IS present
-        │                   && existingState.smeeUrl === expectedSmeeUrl
-        │   (the {secret, URL} pair must have been stored together in a
-        │    prior successful run — neither is fresh, neither was
-        │    overridden via --smee-url.)
-        │   if canSafelySkip
-        │     → skip (idempotent happy path)
-        │   else if matching hook
-        │     → ghUpdateHook(repo, id, payload)  [PATCH — rotate secret
-        │        on the existing hook. Covers three cases: (a) fresh
-        │        secret in this run, (b) --smee-url override to a new
-        │        URL, (c) --smee-url provided but no stored URL.]
+        │   if matching hook
+        │     → ghUpdateHook(repo, id, canonical_payload)
+        │       [PATCH — always reconcile, no skip path. Sets the
+        │        canonical ci-channel config: url, content_type=json,
+        │        secret, insecure_ssl=0, events=[workflow_run],
+        │        active=true. See orchestrator.ts field audit comment.]
         │   else
-        │     → ghCreateHook(repo, payload)  [POSTs via piped stdin]
+        │     → ghCreateHook(repo, canonical_payload)
+        │       [POSTs via piped stdin]
         │   (any failure or user decline throws HERE — state.json untouched)
         ├── writeState(projectRoot, state)  [skipped if unchanged; mode 0o600]
         │   (only reached if the webhook step succeeded)
@@ -182,7 +176,9 @@ runSetup(argv)
         └── printNextSteps(action)  [conditional approval reminder]
 ```
 
-**Critical ordering invariant**: the webhook reconciliation runs **before** the state.json write. This is not an aesthetic choice — it closes a silent-HMAC failure mode. If state were written first, a subsequent failure or user decline of the webhook PATCH would leave state.json with a fresh secret that doesn't match anything on GitHub, and the next run would (incorrectly) treat the persisted secret as "reused from valid state" (`secretWasGenerated === false`) and skip the PATCH path entirely, silently breaking HMAC validation forever. By reconciling the webhook first, a failure/decline throws before state is touched, and the next run correctly re-enters the fresh-secret-PATCH branch.
+**Critical ordering invariant**: the webhook reconciliation runs **before** the state.json write. If state were written first, a subsequent failure or user decline of the webhook PATCH would leave state.json inconsistent with the remote state. By reconciling the webhook first, a failure/decline throws before state is touched, and the next run correctly re-runs the reconciliation.
+
+**No skip path (iter5 structural fix)**: After four iterations of finding silent-failure modes in the skip path (iter1: secret-not-rotated when state deleted; iter2: state-persisted-before-webhook race; iter3: single-field URL-mismatch skip; iter4: active=false / wrong events / wrong content_type skip), the skip path was removed entirely. The installer now always PATCHes an existing hook with the canonical ci-channel payload. The cost is one extra API call per re-run; the benefit is that skip-path edge cases are eliminated by construction. See the extensive `Webhook field audit` block comment in `lib/setup/orchestrator.ts` for the per-field rationale.
 
 ### Configuration (`lib/config.ts`)
 

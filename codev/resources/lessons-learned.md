@@ -136,6 +136,15 @@ The iter2 fix tracked "was the secret regenerated this run?" and used that as th
 ### `gh api --paginate` output can be directly concatenated without newlines
 Across `gh` versions, the fallback page-by-page format (when `--slurp` isn't available) isn't guaranteed to insert newlines between pages — it may emit `[p1][p2]` or `{p1}{p2}` directly. A regex that only splits on `\n(?=[\[\{])` silently misparses the concatenated form. The correct regex uses three alternations: `(?<=\])(?=\[) | (?<=\})(?=\{) | \n(?=[\[\{])`. Mentioned here because it's the kind of format-variation bug that unit tests with a single happy-path mock never catch — the fix requires explicitly testing `[...][...]`, `{...}{...}`, and mixed inputs. When a library advertises "paginated output", never assume a specific delimiter; test multiple concatenation styles explicitly. *(Spec 3, PR review iter3)*
 
+### After N iterations of whack-a-mole on a fast path, delete the fast path
+The webhook reconciliation skip path went through four PR-review iterations before we gave up trying to enumerate every safe-to-skip condition:
+- iter1: didn't rotate the secret when state was deleted
+- iter2: state persisted before webhook, so decline-then-retry bypassed rotation
+- iter3: single-field (secret-only) check missed URL-mismatch cases
+- iter4: the `{secret, URL}` pair check was still not enough — the hook could be `active: false`, have wrong `events`, or wrong `config.content_type`
+
+Empirically, we could not reliably identify every property that made skip unsafe. The structural fix was to remove the skip path entirely: **always reconcile**. The cost is one extra API call per re-run (cheap); the benefit is eliminating an entire class of bug by construction. Pair the structural fix with an explicit field-level audit comment in the code documenting every property the installer touches and why, so future contributors don't re-introduce the fast path. General principle: **if you've spent more time fixing edge cases in an optimization than implementing it, the optimization is wrong**. *(Spec 3, PR review iter4)*
+
 ### Legacy global config fallback can silently override project-scoped state
 `lib/config.ts` originally had a fallback: when a project root was detected but `<project-root>/.claude/channels/ci/.env` didn't exist, fall back to `~/.claude/channels/ci/.env`. This was added for backward compat with pre-project-scope installs, but combined with the installer's "never write `.env`" rule, it meant a stale global `WEBHOOK_SECRET`/`SMEE_URL` from an older install would silently override freshly-written project state. Fix: once a project root is detected, never fall back to the global path — return the project-local path even if it doesn't exist. The global fallback only applies when no project root is found. Unit tests must exercise `getDefaultEnvPath()` directly; `loadConfig()` tests that pass explicit paths don't catch this. *(Spec 3, PR review)*
 
