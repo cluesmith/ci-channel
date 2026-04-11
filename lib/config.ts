@@ -62,12 +62,16 @@ const GLOBAL_ENV_PATH = join(homedir(), '.claude', 'channels', 'ci', '.env')
 export function getDefaultEnvPath(): string {
   const projectRoot = findProjectRoot()
   if (projectRoot) {
-    const projectEnv = join(projectRoot, '.claude', 'channels', 'ci', '.env')
-    // Prefer project-local; fall back to global only if project-local doesn't exist
-    if (existsSync(projectEnv)) return projectEnv
-    if (existsSync(GLOBAL_ENV_PATH)) return GLOBAL_ENV_PATH
-    return projectEnv
+    // Project-scoped: always use project-local .env, NO global fallback.
+    // The previous version fell back to ~/.claude/channels/ci/.env when the
+    // project-local file was missing, which caused a real bug (v0.5.2 fix):
+    // a stale global .env from an earlier install would steal config
+    // (WEBHOOK_SECRET, SMEE_URL) from a fresh project-scoped install, causing
+    // every incoming webhook to fail signature validation.
+    return join(projectRoot, '.claude', 'channels', 'ci', '.env')
   }
+  // No project root detected — standalone use, fall back to global for
+  // strict backward compatibility with pre-v0.2.0 installs.
   if (existsSync(GLOBAL_ENV_PATH)) return GLOBAL_ENV_PATH
   return join(process.cwd(), '.claude', 'channels', 'ci', '.env')
 }
