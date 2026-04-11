@@ -1,0 +1,32 @@
+I’ll treat this as a spec-review pass rather than implementation review, so I’m checking for contradictions, testability gaps, and places where an implementer could satisfy one sentence while violating another.**Findings**
+
+1. **Gitea token validation conflicts with the common state-first flow.**  
+   The spec says common flow steps 3-6 generate/fetch/write `state.json` before forge-specific API work, but the Gitea section says missing `GITEA_TOKEN` must “fail fast.” It is unclear whether `ci-channel setup --forge gitea` with no token should fetch a smee URL and write state before failing, or fail before any provisioning. Clarify the order explicitly.
+
+2. **Codev “byte-equal” language is too strong.**  
+   The Codev section says “Do not change any other field … must remain byte-equal when re-serialized,” but `JSON.parse` + `JSON.stringify(config, null, 2)` will preserve key order and values, not original bytes. Formatting, escaped character representation, and trailing whitespace may change. The intended requirement seems to be “only mutate `shell.architect`; write with canonical 2-space JSON when a change is made.”
+
+3. **The line-count discussion is internally confusing.**  
+   The hard cap is clear: `lib/setup.ts` ≤300 lines. But “Success Looks Like” says “bringing it from ~195 to ~345 max” and then corrects itself. That paragraph should be cleaned up because reviewers are instructed to enforce exact caps.
+
+4. **Gitea “Content-Type on all requests” should probably exclude GET.**  
+   It is harmless in many servers, but unusual. Better: require `Authorization` on all Gitea requests and `Content-Type: application/json` on POST/PATCH requests with bodies.
+
+5. **Testing strategy should explicitly cover Gitea no-token ordering.**  
+   The missing-token test seeds `state.json`, so it does not resolve the ambiguity above. Add or clarify whether missing token should leave an unseeded project untouched or whether state provisioning may happen first.
+
+**Security Notes**
+
+The security model is otherwise sound: no prompt collection of secrets, no token in `state.json`, `process.env` precedence over `.env`, HMAC/token behavior preserved by forge, and explicit false GitLab event fields reduce accidental notification surface.
+
+**Feasibility**
+
+Technically feasible within the constraints, but tight. The single-file/no-DI/no-new-deps approach is workable because only step 7 differs per forge, but the 300-line setup cap will require disciplined cleanup of existing setup code.
+
+---
+VERDICT: REQUEST_CHANGES
+SUMMARY: Requirements are mostly complete, but Gitea token/state ordering and Codev byte-equality wording need clarification before implementation.
+CONFIDENCE: HIGH
+---
+
+KEY_ISSUES: Clarify whether missing `GITEA_TOKEN` fails before or after state provisioning; replace inaccurate Codev byte-equality wording; clean up contradictory line-count language.
