@@ -157,11 +157,21 @@ runSetup(argv)
         ├── resolveSmeeUrl:  --smee-url override | reuse | fetchSmeeChannel
         ├── isGitignored check → io.warn if not ignored
         ├── ghListHooks(repo) → scan for matching smee URL
+        ├── warn if multiple hooks point at the same URL
         ├── ── webhook reconciliation FIRST (before state write) ──
-        │   if matching hook && secret was freshly generated this run
-        │     → ghUpdateHook(repo, id, payload)  [PATCHes existing hook with new secret]
-        │   else if matching hook && secret reused from state
+        │   canSafelySkip = matchingHook
+        │                   && existingState.webhookSecret IS present
+        │                   && existingState.smeeUrl === expectedSmeeUrl
+        │   (the {secret, URL} pair must have been stored together in a
+        │    prior successful run — neither is fresh, neither was
+        │    overridden via --smee-url.)
+        │   if canSafelySkip
         │     → skip (idempotent happy path)
+        │   else if matching hook
+        │     → ghUpdateHook(repo, id, payload)  [PATCH — rotate secret
+        │        on the existing hook. Covers three cases: (a) fresh
+        │        secret in this run, (b) --smee-url override to a new
+        │        URL, (c) --smee-url provided but no stored URL.]
         │   else
         │     → ghCreateHook(repo, payload)  [POSTs via piped stdin]
         │   (any failure or user decline throws HERE — state.json untouched)

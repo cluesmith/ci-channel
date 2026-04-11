@@ -144,10 +144,17 @@ describe('ghListHooks', () => {
     assert.deepEqual(hooks, [])
   })
 
-  test('--slurp unsupported → falls back to --paginate', async () => {
-    const recorder = freshRecorder()
+  /**
+   * Build a spawner that simulates "--slurp unsupported" on the first
+   * call and returns `fallbackStdout` on the second call. Used by the
+   * fallback-path parser tests.
+   */
+  function buildFallbackSpawner(
+    fallbackStdout: string,
+    recorder: RecordedSpawn,
+  ): SpawnFn {
     let callCount = 0
-    const spawner: SpawnFn = (command, args, options) => {
+    return (command, args, options) => {
       callCount++
       recorder.command = command
       recorder.args = args
@@ -159,30 +166,31 @@ describe('ghListHooks', () => {
       if (callCount === 1) {
         // First call: --slurp fails with "unknown flag".
         return makeFakeChild(
-          {
-            exitCode: 1,
-            stderr: 'unknown flag: --slurp',
-          },
+          { exitCode: 1, stderr: 'unknown flag: --slurp' },
           stdioArr,
           recorder,
         )
       }
-      // Second call (fallback): return page-by-page output.
+      // Second call (fallback): return the caller-specified stdout.
       return makeFakeChild(
-        {
-          stdout:
-            JSON.stringify([{ id: 1 }, { id: 2 }]) +
-            '\n' +
-            JSON.stringify([{ id: 3 }]),
-          exitCode: 0,
-        },
+        { stdout: fallbackStdout, exitCode: 0 },
         stdioArr,
         recorder,
       )
     }
+  }
 
-    const hooks = await ghListHooks('owner/repo', { spawn: spawner })
-    assert.equal(callCount, 2)
+  test('--slurp unsupported → falls back to --paginate (newline-separated pages)', async () => {
+    const recorder = freshRecorder()
+    const fallbackStdout =
+      JSON.stringify([{ id: 1 }, { id: 2 }]) +
+      '\n' +
+      JSON.stringify([{ id: 3 }])
+
+    const hooks = await ghListHooks('owner/repo', {
+      spawn: buildFallbackSpawner(fallbackStdout, recorder),
+    })
+
     assert.deepEqual([...recorder.args], [
       'api',
       '--paginate',
@@ -190,6 +198,59 @@ describe('ghListHooks', () => {
     ])
     assert.equal(hooks.length, 3)
     assert.deepEqual(hooks.map((h) => h.id), [1, 2, 3])
+  })
+
+  test('--slurp unsupported → parses directly concatenated pages `][`', async () => {
+    // Regression (iter4): the old parsePaginateOutput regex only split
+    // on newlines, so directly concatenated pages like `[p1][p2]` would
+    // fail JSON.parse. The new regex also splits between `]` and `[`.
+    const recorder = freshRecorder()
+    const fallbackStdout =
+      JSON.stringify([{ id: 1 }, { id: 2 }]) +
+      JSON.stringify([{ id: 3 }, { id: 4 }]) +
+      JSON.stringify([{ id: 5 }])
+
+    const hooks = await ghListHooks('owner/repo', {
+      spawn: buildFallbackSpawner(fallbackStdout, recorder),
+    })
+
+    assert.equal(hooks.length, 5)
+    assert.deepEqual(hooks.map((h) => h.id), [1, 2, 3, 4, 5])
+  })
+
+  test('--slurp unsupported → parses directly concatenated pages `}{`', async () => {
+    // Regression (iter4): the old regex also failed on `{p1}{p2}` if
+    // gh returned single-object pages instead of array pages. The new
+    // regex handles that via the `(?<=\})(?=\{)` alternation.
+    const recorder = freshRecorder()
+    const fallbackStdout =
+      JSON.stringify({ id: 10 }) + JSON.stringify({ id: 20 })
+
+    const hooks = await ghListHooks('owner/repo', {
+      spawn: buildFallbackSpawner(fallbackStdout, recorder),
+    })
+
+    assert.equal(hooks.length, 2)
+    assert.deepEqual(hooks.map((h) => h.id), [10, 20])
+  })
+
+  test('--slurp unsupported → parses mixed concatenation (some newlines, some direct)', async () => {
+    // Regression (iter4): the three regex alternations must compose so
+    // that mixed input `[p1][p2]\n[p3][p4]` splits into four chunks.
+    const recorder = freshRecorder()
+    const fallbackStdout =
+      JSON.stringify([{ id: 1 }]) +
+      JSON.stringify([{ id: 2 }]) +
+      '\n' +
+      JSON.stringify([{ id: 3 }]) +
+      JSON.stringify([{ id: 4 }])
+
+    const hooks = await ghListHooks('owner/repo', {
+      spawn: buildFallbackSpawner(fallbackStdout, recorder),
+    })
+
+    assert.equal(hooks.length, 4)
+    assert.deepEqual(hooks.map((h) => h.id), [1, 2, 3, 4])
   })
 
   test('ENOENT → SetupError with install hint', async () => {

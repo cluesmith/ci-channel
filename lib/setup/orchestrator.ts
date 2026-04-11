@@ -141,6 +141,18 @@ export async function runInstall(
     (h) => h.config?.url === expectedSmeeUrl,
   )
 
+  // Warn if multiple hooks point at the same URL — unusual but possible
+  // (user created duplicates). We only PATCH/skip the first; the others
+  // stay as-is with unknown secrets and should be cleaned up manually.
+  const allMatching = existingHooks.filter(
+    (h) => h.config?.url === expectedSmeeUrl,
+  )
+  if (allMatching.length > 1) {
+    io.warn(
+      `[ci-channel setup] Warning: ${allMatching.length} webhooks point at ${expectedSmeeUrl}. Only the first (id ${allMatching[0].id}) will be reconciled; delete the duplicates manually if not needed.`,
+    )
+  }
+
   // --- Create or update webhook (BEFORE writing state.json) ---
   //
   // Ordering rule: the webhook must be reconciled with our intended
@@ -155,15 +167,35 @@ export async function runInstall(
   // (possibly still-empty) state.json alone, and the next run detects
   // the fresh-secret-needed case again correctly.
   //
-  // There are three cases:
-  //   (1) No matching hook → create one.
-  //   (2) Matching hook + reused secret → skip (idempotent re-run).
-  //   (3) Matching hook + **freshly generated** secret → PATCH the hook
-  //       to use the new secret. Without this, the hook keeps signing
-  //       with the old secret (which nobody has — we just regenerated
-  //       it), and every event fails HMAC validation silently. This
-  //       happens when state.json was deleted or partially corrupted
-  //       but the webhook was left in place.
+  // Skip condition (tightened in iter4 after Codex caught two
+  // additional silent-failure modes):
+  //
+  //   We can only safely SKIP webhook reconciliation when we have high
+  //   confidence that the existing GitHub hook was created with the
+  //   exact secret that's in our stored state. That requires BOTH
+  //   fields to have been written as a pair in a prior successful run:
+  //
+  //     - existingState.webhookSecret is present (not regenerating)
+  //     - existingState.smeeUrl === expectedSmeeUrl (not overridden
+  //       via --smee-url, not newly specified)
+  //
+  //   If EITHER condition is false, the hook's secret is not
+  //   provably the same as our stored secret, so we must PATCH the
+  //   hook to bring it into alignment. Specifically:
+  //
+  //     - Fresh secret (case D from the audit): user has no state, or
+  //       state has no secret. The hook at our URL was made with some
+  //       other secret. PATCH.
+  //     - URL newly supplied via --smee-url with stored secret but no
+  //       stored URL (case F): the stored secret was paired with some
+  //       other URL (or nothing), so the hook at the CLI URL almost
+  //       certainly uses a different secret. PATCH.
+  //     - URL override to a different stored URL (case G): the stored
+  //       secret was paired with the old URL; the hook at the new URL
+  //       was created separately. PATCH.
+  //
+  //   This "secret and URL were stored as a pair" rule is stricter
+  //   than either "secret is reused" or "URL is unchanged" alone.
   const webhookPayload = {
     config: {
       url: expectedSmeeUrl,
@@ -174,42 +206,53 @@ export async function runInstall(
     active: true,
   }
 
-  if (matchingHook && !secretWasGenerated) {
-    // Case (2): idempotent happy path.
+  const stateHasPairedUrl =
+    !!existingState.webhookSecret &&
+    existingState.smeeUrl === expectedSmeeUrl
+  const canSafelySkip = !!matchingHook && stateHasPairedUrl
+
+  if (canSafelySkip) {
+    // Idempotent happy path: stored {secret, URL} pair intact, hook
+    // present at the stored URL. Skip with high confidence.
     io.info(
-      `[ci-channel setup] Webhook already exists for ${expectedSmeeUrl} — skipping create`,
+      `[ci-channel setup] Webhook already exists for ${expectedSmeeUrl} — skipping create (stored pair intact)`,
     )
-  } else if (matchingHook && secretWasGenerated) {
-    // Case (3): stale secret on existing hook. PATCH it.
+  } else if (matchingHook) {
+    // Matching URL but secret may not match — must PATCH.
     if (matchingHook.id === undefined) {
       throw new SetupError(
         `gh returned a matching hook without an id; cannot update. Delete the existing webhook at ${expectedSmeeUrl} manually and re-run setup.`,
       )
     }
+    const reason = reasonForPatch(
+      secretWasGenerated,
+      existingState,
+      expectedSmeeUrl,
+    )
     if (args.dryRun) {
       io.info(
-        `[ci-channel setup] [dry-run] Would update existing webhook (id ${matchingHook.id}) with freshly generated secret (state.json was missing a secret)`,
+        `[ci-channel setup] [dry-run] Would update existing webhook (id ${matchingHook.id}) to match current credentials (${reason})`,
       )
     } else {
       if (
         !(await io.confirm(
-          `Update existing webhook (id ${matchingHook.id}) with the newly generated secret?`,
+          `Update existing webhook (id ${matchingHook.id}) to use the current credentials? (${reason})`,
         ))
       ) {
         throw new UserDeclinedError('Stopped before updating webhook secret.')
       }
       await deps.ghUpdateHook(args.repo, matchingHook.id, webhookPayload)
       io.info(
-        `[ci-channel setup] Updated existing webhook (id ${matchingHook.id}) — rotated to freshly generated secret`,
+        `[ci-channel setup] Updated existing webhook (id ${matchingHook.id}) — rotated to current credentials (${reason})`,
       )
     }
   } else if (args.dryRun) {
-    // Case (1) in dry-run.
+    // No match: dry-run preview.
     io.info(
       `[ci-channel setup] [dry-run] Would create GitHub webhook on ${args.repo} targeting ${expectedSmeeUrl}`,
     )
   } else {
-    // Case (1): create new webhook.
+    // No match: create new webhook.
     if (!(await io.confirm(`Create GitHub webhook on ${args.repo}?`))) {
       throw new UserDeclinedError('Stopped before webhook creation.')
     }
@@ -293,6 +336,26 @@ function stateDiffers(prev: PluginState, next: PluginState): boolean {
   if (prev.webhookSecret !== next.webhookSecret) return true
   if (prev.smeeUrl !== next.smeeUrl) return true
   return false
+}
+
+/**
+ * Human-readable reason for why the installer is about to PATCH an
+ * existing webhook. Used in both the dry-run preview and the
+ * confirmation prompt so the user understands what's being rotated
+ * and why.
+ */
+function reasonForPatch(
+  secretWasGenerated: boolean,
+  existingState: PluginState,
+  expectedSmeeUrl: string,
+): string {
+  if (secretWasGenerated) {
+    return 'generated a fresh secret this run; existing hook signs with a secret we no longer have'
+  }
+  if (!existingState.smeeUrl) {
+    return `smee URL was supplied via --smee-url but wasn't in stored state; existing hook at ${expectedSmeeUrl} was created elsewhere`
+  }
+  return `smee URL was overridden from ${existingState.smeeUrl} to ${expectedSmeeUrl}; existing hook at the new URL was created elsewhere`
 }
 
 /**

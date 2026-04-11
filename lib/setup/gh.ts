@@ -237,14 +237,26 @@ function parseSlurpOutput(stdout: string): GhHook[] {
 
 /**
  * Fallback parser for `gh api --paginate` (without --slurp). Output
- * format varies: pages may be concatenated with newlines, or joined
- * directly. We split on newlines that precede `[` or `{` and parse
- * each chunk independently.
+ * format varies across gh versions: pages may be separated by
+ * newlines (`[...]\n[...]`) OR concatenated directly (`[...][...]`,
+ * `{...}{...}`). We split at any of:
+ *
+ *   - `]` immediately followed by `[`  (array-page concatenation)
+ *   - `}` immediately followed by `{`  (object-page concatenation)
+ *   - a newline followed by `[` or `{` (newline-separated format)
+ *
+ * Each chunk is then parsed independently and flattened.
  */
 function parsePaginateOutput(stdout: string): GhHook[] {
   const trimmed = stdout.trim()
   if (!trimmed) return []
-  const chunks = trimmed.split(/\n(?=[\[\{])/)
+  // Three alternations handle the three concatenation styles. Uses
+  // zero-width lookbehinds/lookaheads so the delimiters are NOT
+  // consumed by split — the closing bracket stays at the end of the
+  // previous chunk and the opening bracket starts the next chunk.
+  const chunks = trimmed.split(
+    /(?<=\])(?=\[)|(?<=\})(?=\{)|\n(?=[\[\{])/,
+  )
   const result: GhHook[] = []
   for (const chunk of chunks) {
     if (!chunk.trim()) continue

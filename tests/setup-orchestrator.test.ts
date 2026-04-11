@@ -347,7 +347,7 @@ describe('runInstall — webhook secret freshness vs existing hook (silent-HMAC-
     //   6. AFTER FIX: state.json is written AFTER the webhook step, so
     //      declining throws UserDeclinedError with state.json still
     //      empty. Next run re-enters the PATCH path correctly.
-    const { deps, calls } = buildMockDepsAndIo({
+    const { deps, io, calls } = buildMockDepsAndIo({
       existingState: {
         smeeUrl: 'https://smee.io/existing',
         // No webhookSecret — installer must regenerate
@@ -396,6 +396,142 @@ describe('runInstall — webhook secret freshness vs existing hook (silent-HMAC-
       0,
       'state.json must NOT be written when PATCH is declined — otherwise next run will skip the PATCH as idempotent and silently break HMAC',
     )
+  })
+
+  test('case F (iter4): stored secret but no stored URL + --smee-url + matching hook → PATCH (not skip)', async () => {
+    // Architect's iter3 bug (a):
+    //   existingState = { webhookSecret: X } (no smeeUrl)
+    //   user passes --smee-url Y
+    //   hook exists at Y
+    //
+    // Before fix: stateHasPairedUrl logic was absent; the old
+    // `matchingHook && !secretWasGenerated` check skipped. The hook
+    // at Y was created with some other secret, so HMAC would fail.
+    //
+    // After fix: existingState.smeeUrl is undefined, which does not
+    // equal expectedSmeeUrl (= Y), so stateHasPairedUrl is false →
+    // PATCH path.
+    const { deps, io, calls } = buildMockDepsAndIo({
+      existingState: {
+        webhookSecret: 'stored-secret-X',
+        // no smeeUrl
+      },
+      ghHooks: [
+        { id: 101, config: { url: 'https://smee.io/cli-provided' } },
+      ],
+    })
+
+    const args = baseArgs()
+    args.smeeUrl = 'https://smee.io/cli-provided'
+
+    await runInstall(args, deps, io)
+
+    // Must have PATCHed, NOT skipped.
+    assert.equal(calls.ghCreateHookCalls, 0)
+    assert.equal(calls.ghUpdateHookCalls, 1)
+    assert.equal(calls.ghUpdateHookLastArg?.hookId, 101)
+    // The PATCH payload carries the stored secret (not a fresh one —
+    // secretWasGenerated=false in this scenario).
+    const payload = calls.ghUpdateHookLastArg?.payload as {
+      config: { secret: string; url: string }
+    }
+    assert.equal(payload.config.secret, 'stored-secret-X')
+    assert.equal(payload.config.url, 'https://smee.io/cli-provided')
+
+    // ... and since stateWasGenerated === false, generateSecret was
+    // not called.
+    assert.equal(calls.generateSecretCalls, 0)
+    // State IS written because writeStateLastArg will have a new
+    // smeeUrl (was undefined, now set).
+    assert.equal(calls.writeStateCalls, 1)
+  })
+
+  test('case G (iter4): --smee-url override to different URL with matching hook → PATCH (not skip)', async () => {
+    // Architect's iter3 bug (b):
+    //   existingState = { webhookSecret: X, smeeUrl: A }
+    //   user passes --smee-url B (differs)
+    //   hook exists at B
+    //
+    // Before fix: secretWasGenerated=false → skip. But the hook at
+    // B was created outside this installer (or by a different run)
+    // with some other secret; the stored X was paired with A, not B.
+    // Silent HMAC break.
+    //
+    // After fix: existingState.smeeUrl (A) !== expectedSmeeUrl (B)
+    // → stateHasPairedUrl=false → PATCH path.
+    const { deps, io, calls } = buildMockDepsAndIo({
+      existingState: {
+        webhookSecret: 'stored-secret-X',
+        smeeUrl: 'https://smee.io/A-original',
+      },
+      ghHooks: [
+        { id: 202, config: { url: 'https://smee.io/B-new' } },
+      ],
+    })
+
+    const args = baseArgs()
+    args.smeeUrl = 'https://smee.io/B-new'
+
+    await runInstall(args, deps, io)
+
+    // Must PATCH, not skip.
+    assert.equal(calls.ghCreateHookCalls, 0)
+    assert.equal(calls.ghUpdateHookCalls, 1)
+    assert.equal(calls.ghUpdateHookLastArg?.hookId, 202)
+
+    // The "--smee-url override" warning about the old webhook being
+    // left in place should also fire.
+    const overrideWarnings = calls.warn.filter((w) =>
+      w.includes('old webhook for the previous smee URL'),
+    )
+    assert.equal(overrideWarnings.length, 1)
+  })
+
+  test('case H (iter4): --smee-url matches stored URL + matching hook → skip (idempotent happy path)', async () => {
+    // Sanity check: when the stored pair matches the CLI override and
+    // the hook exists, we still skip. No regression.
+    const { deps, io, calls } = buildMockDepsAndIo({
+      existingState: {
+        webhookSecret: 'stored-secret',
+        smeeUrl: 'https://smee.io/stable',
+      },
+      ghHooks: [
+        { id: 1, config: { url: 'https://smee.io/stable' } },
+      ],
+    })
+
+    const args = baseArgs()
+    args.smeeUrl = 'https://smee.io/stable'
+
+    await runInstall(args, deps, io)
+
+    assert.equal(calls.ghCreateHookCalls, 0)
+    assert.equal(calls.ghUpdateHookCalls, 0) // skip, not PATCH
+  })
+
+  test('multiple hooks at same URL → warn and reconcile only the first', async () => {
+    const { deps, io, calls } = buildMockDepsAndIo({
+      existingState: {
+        smeeUrl: 'https://smee.io/dup',
+      },
+      ghHooks: [
+        { id: 10, config: { url: 'https://smee.io/dup' } },
+        { id: 20, config: { url: 'https://smee.io/dup' } },
+      ],
+    })
+
+    await runInstall(baseArgs(), deps, io)
+
+    // Warning fired.
+    const dupWarnings = calls.warn.filter((w) =>
+      w.includes('2 webhooks point at'),
+    )
+    assert.equal(dupWarnings.length, 1)
+
+    // Only the first hook is PATCHed (fresh secret was generated since
+    // existingState has no webhookSecret).
+    assert.equal(calls.ghUpdateHookCalls, 1)
+    assert.equal(calls.ghUpdateHookLastArg?.hookId, 10)
   })
 
   test('dry-run: fresh secret + matching hook → logs "would update", no call', async () => {

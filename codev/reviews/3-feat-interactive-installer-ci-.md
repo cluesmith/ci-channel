@@ -9,7 +9,7 @@
 
 Added a `ci-channel setup` subcommand that replaces the previous five-step manual install flow with a single command. The installer detects the project root, provisions a smee.io channel, generates a webhook secret, creates the GitHub webhook via `gh api`, and registers the `ci` MCP server in `.mcp.json` — all idempotently, with `--yes` / `--dry-run` flags and optional interactive prompts backed by `@inquirer/prompts`. GitHub-only in v1; GitLab/Gitea users fall back to the manual flow in INSTALL.md (now retained as the secondary install path).
 
-The feature is a pure addition: no existing `lib/` file was modified beyond a ~10-line subcommand dispatch at the top of `server.ts` and a small `lib/config.ts` fix (remove global `.env` fallback when a project root is detected) added during PR review. All 170 pre-existing tests still pass; 133 new tests were added across 9 new test files, bringing the suite to **303 tests / 20 files**.
+The feature is a pure addition: no existing `lib/` file was modified beyond a ~10-line subcommand dispatch at the top of `server.ts` and a small `lib/config.ts` fix (remove global `.env` fallback when a project root is detected) added during PR review. All 170 pre-existing tests still pass; 142 new tests were added across 9 new test files, bringing the suite to **312 tests / 20 files**. The webhook reconciliation logic went through four PR-review iterations before converging on a safe implementation (iter1: basic idempotency; iter2: PATCH on fresh secret; iter3: reorder state-write after webhook; iter4: tighten skip condition to require stored `{secret, URL}` pair).
 
 ## Spec Compliance
 
@@ -209,7 +209,7 @@ None of substance. Two minor adjustments:
 
 ## Flaky Tests
 
-No flaky tests encountered during this project. All 303 tests pass deterministically on every run locally. The pre-existing `stdio-lifecycle.test.ts` test (which spawns a real server subprocess and exercises the full webhook pipeline) continues to pass.
+No flaky tests encountered during this project. All 312 tests pass deterministically on every run locally. The pre-existing `stdio-lifecycle.test.ts` test (which spawns a real server subprocess and exercises the full webhook pipeline) continues to pass.
 
 ## Follow-up Items
 
