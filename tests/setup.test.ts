@@ -438,12 +438,12 @@ describe('ci-channel setup', () => {
     })
   })
 
-  test('R3. remove GitHub with customized .mcp.json ci entry: leave entry alone, still delete state + webhook', { skip: WIN }, async () => {
+  test('R3. remove with unrecognized .mcp.json ci entry: leave entry alone, still delete state + webhook', { skip: WIN }, async () => {
     await inProject(async ({ root, bin }) => {
       const statePath = seedState(root, { webhookSecret: SECRET, smeeUrl: URL_ })
-      const customized = { mcpServers: { ci: { command: 'npx', args: ['-y', 'ci-channel'], env: { FOO: 'bar' } } } }
-      const mcpBefore = JSON.stringify(customized, null, 2) + '\n'
-      writeFileSync(join(root, '.mcp.json'), mcpBefore)
+      // Unrecognized entry: command is 'node' (not 'npx'), so the loose check leaves it alone.
+      const unrecognized = { mcpServers: { ci: { command: 'node', args: ['/custom/path/to/ci-channel/dist/server.js'] } } }
+      writeFileSync(join(root, '.mcp.json'), JSON.stringify(unrecognized, null, 2) + '\n')
       mkFakeCli(bin, 'gh', [{ stdout: JSON.stringify([[{ id: 42, config: { url: URL_ } }]]) }, { stdout: '{}' }])
       const res = await runRemove(['--repo', 'foo/bar'])
       assert.equal(res.exitCode, null, `unexpected exit: ${res.stderr}`)
@@ -451,8 +451,8 @@ describe('ci-channel setup', () => {
       assert.ok(!existsSync(statePath), 'state.json should be deleted')
       // .mcp.json ci entry preserved (round-trip equal)
       const mcpAfter = JSON.parse(readFileSync(join(root, '.mcp.json'), 'utf-8'))
-      assert.deepEqual(mcpAfter, customized)
-      assert.match(res.stderr, /does not match the canonical shape for --forge github/)
+      assert.deepEqual(mcpAfter, unrecognized)
+      assert.match(res.stderr, /'ci' entry not recognized — leaving alone/)
     })
   })
 

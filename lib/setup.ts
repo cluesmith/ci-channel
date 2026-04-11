@@ -280,6 +280,12 @@ export async function setup(argv: string[]): Promise<void> {
   }
 }
 
+interface RemoveState { smeeUrl?: string; webhookSecret?: string }
+interface McpEntry { command?: unknown; args?: unknown }
+interface McpFile { mcpServers?: Record<string, McpEntry> }
+interface CodevConfig { shell?: { architect?: string } }
+interface Hook { id: number; url?: string; config?: { url?: string } }
+
 export async function remove(argv: string[]): Promise<void> {
   try {
     const { repo, forge, giteaUrl } = parseCommandArgs(argv, 'remove')
@@ -289,10 +295,10 @@ export async function remove(argv: string[]): Promise<void> {
     log(`Target repo:  ${repo}`)
     const statePath = join(root, '.claude', 'channels', 'ci', 'state.json')
     if (!existsSync(statePath)) throw new Error(`no ci-channel install detected in this project (no state.json at ${statePath}). Nothing to uninstall.`)
-    let state: Record<string, unknown>
-    try { state = JSON.parse(readFileSync(statePath, 'utf-8')) }
+    let state: RemoveState
+    try { state = JSON.parse(readFileSync(statePath, 'utf-8')) as RemoveState }
     catch (e) { throw new Error(`state.json at ${statePath} is unreadable or malformed: ${(e as Error).message}. Fix or delete the file, then retry.`) }
-    const smeeUrl = state?.smeeUrl
+    const smeeUrl = state.smeeUrl
     if (typeof smeeUrl !== 'string' || !smeeUrl) throw new Error(`state.json at ${statePath} is missing a 'smeeUrl' field. Cannot match webhook. If you want to force a reinstall, delete state.json and re-run \`ci-channel setup\`.`)
     let giteaToken: string | undefined
     if (forge === 'gitea') {
@@ -300,38 +306,41 @@ export async function remove(argv: string[]): Promise<void> {
       giteaToken = (process.env.GITEA_TOKEN ?? '').trim() || (readEnvToken(envPath, 'GITEA_TOKEN') ?? '').trim() || undefined
       if (!giteaToken) throw new Error(`GITEA_TOKEN not set. Generate a token at ${giteaUrl}/user/settings/applications (scopes: write:repository) and add it to ${envPath} as GITEA_TOKEN=... or export GITEA_TOKEN in your shell.`)
     }
-    // Shared nested helper for gh + glab (list → match → DELETE with 404-soft)
-    // biome-ignore lint/suspicious/noExplicitAny: untyped JSON from CLI
-    const cliDelete = async (bin: 'gh' | 'glab', listArgs: string[], matchFn: (h: any) => boolean, delPath: (id: number) => string) => {
-      log(`Listing existing webhooks on ${repo}...`)
-      let hooks: unknown[]
-      try {
-        const parsed = JSON.parse(await cliApi(bin, listArgs, null))
-        hooks = bin === 'gh' ? (Array.isArray(parsed) ? parsed.flat() : []) : (Array.isArray(parsed) ? parsed : [])
-      } catch (e) { throw classifyForgeError(bin, e, repo) }
-      // biome-ignore lint/suspicious/noExplicitAny: untyped JSON
-      const hit = hooks.find(matchFn) as any
-      if (!hit) return log(`no matching webhook found on ${bin === 'gh' ? 'github' : 'gitlab'}; skipping webhook delete`)
-      log(`Found webhook ${hit.id} on ${repo} — deleting...`)
-      try { await cliApi(bin, ['api', '--method', 'DELETE', delPath(hit.id)], null); log(`Deleted webhook ${hit.id}`) }
-      // biome-ignore lint/suspicious/noExplicitAny: err is opaque
-      catch (e) { if (/HTTP 404|Not Found/i.test(String((e as any)?.stderr ?? ''))) log(`webhook ${hit.id} already deleted; continuing`); else throw classifyForgeError(bin, e, repo) }
-    }
     if (forge === 'github') {
-      await cliDelete('gh', ['api', '--paginate', '--slurp', `repos/${repo}/hooks`], (h) => h?.config?.url === smeeUrl, (id) => `repos/${repo}/hooks/${id}`)
+      log(`Listing existing webhooks on ${repo}...`)
+      let hooks: Hook[]
+      try { hooks = (JSON.parse(await cliApi('gh', ['api', '--paginate', '--slurp', `repos/${repo}/hooks`], null)) as Hook[][]).flat() }
+      catch (e) { throw classifyForgeError('gh', e, repo) }
+      const hit = hooks.find((h) => h?.config?.url === smeeUrl)
+      if (!hit) log(`no matching webhook found on github; skipping webhook delete`)
+      else {
+        log(`Found webhook ${hit.id} on ${repo} — deleting...`)
+        try { await cliApi('gh', ['api', '--method', 'DELETE', `repos/${repo}/hooks/${hit.id}`], null); log(`Deleted webhook ${hit.id}`) }
+        // biome-ignore lint/suspicious/noExplicitAny: subprocess error shape
+        catch (e) { if (/HTTP 404|Not Found/i.test(String((e as any)?.stderr ?? ''))) log(`webhook ${hit.id} already deleted; continuing`); else throw classifyForgeError('gh', e, repo) }
+      }
     } else if (forge === 'gitlab') {
       const enc = encodeURIComponent(repo)
-      await cliDelete('glab', ['api', `projects/${enc}/hooks`], (h) => h?.url === smeeUrl, (id) => `projects/${enc}/hooks/${id}`)
+      log(`Listing existing hooks on ${repo}...`)
+      let hooks: Hook[]
+      try { hooks = JSON.parse(await cliApi('glab', ['api', `projects/${enc}/hooks`], null)) as Hook[] }
+      catch (e) { throw classifyForgeError('glab', e, repo) }
+      const hit = Array.isArray(hooks) ? hooks.find((h) => h?.url === smeeUrl) : undefined
+      if (!hit) log(`no matching webhook found on gitlab; skipping webhook delete`)
+      else {
+        log(`Found webhook ${hit.id} on ${repo} — deleting...`)
+        try { await cliApi('glab', ['api', '--method', 'DELETE', `projects/${enc}/hooks/${hit.id}`], null); log(`Deleted webhook ${hit.id}`) }
+        // biome-ignore lint/suspicious/noExplicitAny: subprocess error shape
+        catch (e) { if (/HTTP 404|Not Found/i.test(String((e as any)?.stderr ?? ''))) log(`webhook ${hit.id} already deleted; continuing`); else throw classifyForgeError('glab', e, repo) }
+      }
     } else {
       // gitea — LIST via giteaFetch (404 = hard fail); DELETE direct-fetch for 404-soft
       const base = giteaUrl!.replace(/\/$/, '')
       const url = `${base}/api/v1/repos/${repo}/hooks`
       const authHdrs = { Authorization: `token ${giteaToken!}` }
       log(`Listing existing hooks at ${url}...`)
-      // biome-ignore lint/suspicious/noExplicitAny: untyped JSON
-      const hooks = (await (await giteaFetch(url, { headers: authHdrs }, repo, base)).json()) as any[]
-      // biome-ignore lint/suspicious/noExplicitAny: untyped JSON
-      const hit = Array.isArray(hooks) ? hooks.find((h: any) => h?.config?.url === smeeUrl) : null
+      const hooks = (await (await giteaFetch(url, { headers: authHdrs }, repo, base)).json()) as Hook[]
+      const hit = Array.isArray(hooks) ? hooks.find((h) => h?.config?.url === smeeUrl) : undefined
       if (!hit) log(`no matching webhook found on gitea; skipping webhook delete`)
       else {
         log(`Found webhook ${hit.id} on ${repo} — deleting...`)
@@ -354,35 +363,29 @@ export async function remove(argv: string[]): Promise<void> {
     const mcpPath = join(root, '.mcp.json')
     if (!existsSync(mcpPath)) log(`no .mcp.json found — skipping`)
     else {
-      // biome-ignore lint/suspicious/noExplicitAny: user-owned JSON
-      const mcp: any = JSON.parse(readFileSync(mcpPath, 'utf-8'))
-      const servers = mcp?.mcpServers
+      const mcp = JSON.parse(readFileSync(mcpPath, 'utf-8')) as McpFile
+      const servers = mcp.mcpServers
       if (servers == null || typeof servers !== 'object' || Array.isArray(servers)) log(`.mcp.json has no usable mcpServers object — skipping`)
       else if (!('ci' in servers)) log(`no 'ci' entry in .mcp.json — skipping`)
       else {
         const entry = servers.ci
-        const expected: string[] = ['-y', 'ci-channel']
-        if (forge !== 'github') expected.push('--forge', forge)
-        if (forge === 'gitea') expected.push('--gitea-url', giteaUrl!.replace(/\/$/, ''))
-        if (entry && typeof entry === 'object' && Object.keys(entry).sort().join(',') === 'args,command'
-            && entry.command === 'npx' && Array.isArray(entry.args) && JSON.stringify(entry.args) === JSON.stringify(expected)) {
+        if (entry && typeof entry === 'object' && entry.command === 'npx' && Array.isArray(entry.args) && entry.args.includes('ci-channel')) {
           delete servers.ci
           writeFileSync(mcpPath, JSON.stringify(mcp, null, 2) + '\n')
           log(`Removed 'ci' from ${mcpPath}`)
-        } else log(`warning: .mcp.json 'ci' entry does not match the canonical shape for --forge ${forge}. Leaving it alone. Edit .mcp.json manually if you want to remove it.`)
+        } else log(`warning: .mcp.json 'ci' entry not recognized — leaving alone`)
       }
     }
     const codevPath = join(root, '.codev', 'config.json')
     if (existsSync(codevPath)) {
       try {
-        // biome-ignore lint/suspicious/noExplicitAny: user-owned JSON
-        const config: any = JSON.parse(readFileSync(codevPath, 'utf-8'))
-        const architect = config?.shell?.architect
+        const config = JSON.parse(readFileSync(codevPath, 'utf-8')) as CodevConfig
+        const architect = config.shell?.architect
         const needle = ` ${CODEV_FLAG}`
         if (typeof architect !== 'string' || !architect) log(`.codev/config.json has no shell.architect — skipping (unexpected Codev shape)`)
         else if (!architect.includes(needle)) log(`.codev/config.json does not load ci channel — nothing to revert`)
         else {
-          config.shell.architect = architect.replace(needle, '')
+          config.shell!.architect = architect.replace(needle, '')
           writeFileSync(codevPath, JSON.stringify(config, null, 2) + '\n')
           log(`Reverted .codev/config.json: architect session will no longer load ci channel`)
         }
