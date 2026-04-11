@@ -67,6 +67,21 @@ claude --dangerously-load-development-channels server:ci
 
 Re-running the command is idempotent — safe to run multiple times on any forge.
 
+## Uninstall
+
+```bash
+# GitHub (default)
+npx -y ci-channel remove --repo owner/your-project
+
+# GitLab
+npx -y ci-channel remove --forge gitlab --repo group/project
+
+# Gitea
+npx -y ci-channel remove --forge gitea --gitea-url https://gitea.example.com --repo owner/repo
+```
+
+`remove` is the inverse of `setup` — it deletes the forge webhook, removes `<project-root>/.claude/channels/ci/state.json`, strips the canonical `ci` entry from `.mcp.json`, and reverts the Codev integration if present. If `.mcp.json`'s `ci` entry has been customized, it is left alone with a warning. Running `remove` in a project with no `state.json` fails fast with "no ci-channel install detected in this project".
+
 > **LLM agents**: See [INSTALL.md](INSTALL.md) for step-by-step installation instructions designed for AI agents to follow programmatically.
 
 ## Manual Setup (advanced / GitLab / Gitea)

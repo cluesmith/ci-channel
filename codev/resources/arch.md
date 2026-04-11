@@ -38,7 +38,7 @@ ci-channel/
 │   ├── notify.ts              # Notification formatting, sanitization, MCP push
 │   ├── reconcile.ts           # Startup reconciliation orchestration
 │   ├── project-root.ts        # Walk-up project root discovery (.mcp.json / .git)
-│   └── setup.ts               # `ci-channel setup` installer — multi-forge + Codev auto-integration (Spec 5 + Spec 7)
+│   └── setup.ts               # `ci-channel setup` + `remove` — multi-forge installer/uninstaller + Codev auto-integration (Spec 5 + Spec 7 + Spec 8)
 ├── tests/
 │   ├── forges/
 │   │   ├── gitlab.test.ts     # GitLab forge unit tests
@@ -51,7 +51,7 @@ ci-channel/
 │   ├── integration.test.ts    # GitHub HTTP pipeline end-to-end
 │   ├── integration-gitlab.test.ts  # GitLab HTTP pipeline end-to-end
 │   ├── integration-gitea.test.ts   # Gitea HTTP pipeline end-to-end
-│   ├── setup.test.ts               # `ci-channel setup` installer (8 scenarios, PATH-override fake gh)
+│   ├── setup.test.ts               # `ci-channel setup` + `remove` installer/uninstaller (28 scenarios total: 18 setup + 10 remove)
 │   ├── stdio-lifecycle.test.ts     # MCP stdio stability regression
 │   └── fixtures/
 │       ├── workflow-run-failure.json      # GitHub webhook payload
@@ -165,9 +165,9 @@ Exports `runCommand(args, timeoutMs)` — spawns a CLI command with timeout, ret
 
 **Purpose**: Generic startup reconciliation loop. Iterates branches, calls `forge.runReconciliation()` per branch, applies workflow filter, pushes notifications.
 
-### Installer (`lib/setup.ts`)
+### Installer/Uninstaller (`lib/setup.ts`)
 
-**Purpose**: Implements the `ci-channel setup` subcommand. A deliberately single-file, non-DI, ≤300-line implementation that performs the install operations (generate/load secret, fetch/load smee URL, write state.json, create/update forge webhook, register `ci` in `.mcp.json`, optionally update Codev `shell.architect`) and exits. Spec 5 constrained the file rigidly after Spec 3's 4,385-line attempt was abandoned; Spec 7 loosened the cap to 300 lines to fit multi-forge support (GitHub + GitLab + Gitea) and Codev auto-integration without splitting. See `codev/resources/lessons-learned.md` entry "Prefer single-file implementations + real-fs tests for install/bootstrap commands."
+**Purpose**: Implements the `ci-channel setup` AND `ci-channel remove` subcommands in a single file. A deliberately single-file, non-DI, ≤400-line implementation (Spec 8 raised the cap from Spec 7's 300 to accommodate `remove()`). Exports two functions: `setup()` performs install operations, `remove()` reverses them. Spec 5 constrained the file rigidly after Spec 3's 4,385-line attempt was abandoned; Spec 7 loosened the cap to 300 lines for multi-forge support; Spec 8 loosened to 400 for the remove subcommand. See `codev/resources/lessons-learned.md` entry "Prefer single-file implementations + real-fs tests for install/bootstrap commands."
 
 **Supported forges (Spec 7)**: the CLI accepts `--forge github|gitlab|gitea` (default `github`). Each forge branch shares the same common flow (parse args → project root → [Gitea-only token check] → load state → generate secret → fetch smee → write state → forge API call → `.mcp.json` merge → Codev integration → done). The only per-forge divergence is the "forge API call" step:
 - **GitHub**: `gh api repos/OWNER/REPO/hooks` via subprocess, POST/PATCH with canonical webhook payload
@@ -183,7 +183,20 @@ Exports `runCommand(args, timeoutMs)` — spawns a CLI command with timeout, ret
 - **Codev auto-integration (Spec 7)**: after the core install, if `<project>/.codev/config.json` exists, the installer appends `--dangerously-load-development-channels server:ci` to `shell.architect` (idempotent — substring check). Wrapped in a local `try/catch` that warns and exits 0 on failure — the webhook is already live by this point, so a malformed Codev config should not report "setup failed."
 - **Shared error classification**: `classifyForgeError(bin, err, repo)` maps 404/403/401/ENOENT from `gh` or `glab` stderr to user-friendly error messages. Gitea uses `giteaFetch(url, init, repo, base)` which does the equivalent classification from HTTP status codes.
 
-**Dispatch**: `server.ts` checks `process.argv[2] === 'setup'` as a 5-line block before `loadConfig()` and dynamically imports `./lib/setup.js`. Everything else on the CLI (forges, flags) passes through unchanged.
+**Dispatch**: `server.ts` checks `process.argv[2] === 'setup' || process.argv[2] === 'remove'` as a 5-line block before `loadConfig()` and dynamically imports `./lib/setup.js`. The dynamic import still only fires on these two subcommands, so the server startup path does NOT load installer/uninstaller code. Everything else on the CLI (forges, flags) passes through unchanged.
+
+**Uninstaller (`remove()`, Spec 8)**: Reverses what `setup()` did. Deletes the forge webhook (matched by `smeeUrl` from `state.json`), deletes `state.json`, strips the canonical `ci` entry from `.mcp.json` (leaves non-canonical entries alone with a warning), and reverts Codev integration if `.codev/config.json` contains the loader flag. Fails fast with exit 1 if:
+- `state.json` is missing → `no ci-channel install detected`
+- `state.json` is unreadable or missing `smeeUrl` → distinct error messages
+- `findProjectRoot()` returns null → same error as setup
+- For Gitea: `GITEA_TOKEN` not set (precondition check before any HTTP call)
+- LIST call returns 404 (repo not found) → hard fail via `classifyForgeError`
+
+**404 handling**: the spec disambiguates list-404 (hard fail, repo not found) from delete-404 (soft — webhook already gone, treat as success and continue local cleanup). For GitHub and GitLab, the distinction happens via a nested `cliDelete` helper inside `remove()` with two try/catch blocks — LIST errors hard-fail through `classifyForgeError`, DELETE errors are inspected for `HTTP 404|Not Found` and swallowed. For Gitea, LIST uses the existing `giteaFetch` (404 → hard fail), but DELETE bypasses `giteaFetch` and uses direct `fetch()` with manual status handling.
+
+**Canonical `.mcp.json` check**: `remove()` only deletes the `ci` entry if it exactly matches the shape `setup()` writes for the passed `--forge`: `{ command: 'npx', args: [...] }` with no extra keys and with the full expected args array (forge-specific trailing args included). If the entry has been customized (extra `env` key, different command, hand-edited args), `remove()` leaves it alone and logs a warning. This is the only "safety valve" in remove — there's no `--force` flag.
+
+**Second-run behavior**: `state.json` is the source of truth for "is ci-channel installed here?". Running `remove` twice in a row: first succeeds and deletes `state.json`, second fails fast with exit 1 and `no ci-channel install detected`. This is intentionally NOT idempotent exit-0 — a non-zero exit is more informative for scripts.
 
 ## Data Flow
 

@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fetchSmeeChannel } from './bootstrap.js'
 import { findProjectRoot } from './project-root.js'
@@ -12,7 +12,8 @@ type Forge = (typeof VALID_FORGES)[number]
 
 const log = (msg: string) => console.error(`[ci-channel] ${msg}`)
 
-function parseArgs(argv: string[]): { repo: string; forge: Forge; giteaUrl?: string } {
+function parseCommandArgs(argv: string[], command: 'setup' | 'remove'): { repo: string; forge: Forge; giteaUrl?: string } {
+  const usage = `Usage: ci-channel ${command} --repo owner/repo [--forge github|gitlab|gitea] [--gitea-url URL]`
   let repo: string | undefined
   let forge: Forge = 'github'
   let giteaUrl: string | undefined
@@ -28,9 +29,9 @@ function parseArgs(argv: string[]): { repo: string; forge: Forge; giteaUrl?: str
       continue
     }
     if (a === '--gitea-url' && i + 1 < argv.length) { giteaUrl = argv[++i]; continue }
-    throw new Error(`Usage: ci-channel setup --repo owner/repo [--forge github|gitlab|gitea] [--gitea-url URL] (unexpected arg: ${a})`)
+    throw new Error(`${usage} (unexpected arg: ${a})`)
   }
-  if (!repo) throw new Error('Usage: ci-channel setup --repo owner/repo [--forge github|gitlab|gitea] [--gitea-url URL]')
+  if (!repo) throw new Error(usage)
   if (forge === 'gitea' && !giteaUrl) throw new Error('--gitea-url is required when --forge gitea')
   if (forge !== 'gitea' && giteaUrl) throw new Error('--gitea-url is only valid with --forge gitea')
   if (giteaUrl && !/^https?:\/\//i.test(giteaUrl)) throw new Error(`--gitea-url must start with http:// or https:// (got '${giteaUrl}')`)
@@ -77,25 +78,11 @@ function cliApi(bin: 'gh' | 'glab', args: string[], stdinBody: string | null): P
 
 // biome-ignore lint/suspicious/noExplicitAny: err is opaque until classified
 function classifyForgeError(bin: 'gh' | 'glab', err: any, repo: string): Error {
-  if (err?.code === 'ENOENT') {
-    return bin === 'gh'
-      ? new Error('gh CLI not found. Install from https://cli.github.com/ and run `gh auth login`.')
-      : new Error('glab CLI not found. Install from https://gitlab.com/gitlab-org/cli and run `glab auth login`.')
-  }
+  if (err?.code === 'ENOENT') return new Error(bin === 'gh' ? 'gh CLI not found. Install from https://cli.github.com/ and run `gh auth login`.' : 'glab CLI not found. Install from https://gitlab.com/gitlab-org/cli and run `glab auth login`.')
   const stderr = String(err?.stderr ?? '')
-  if (/HTTP 404|Not Found/i.test(stderr)) {
-    return bin === 'gh'
-      ? new Error(`Could not find repo '${repo}'. Check the spelling, or verify you have access (gh returned 404).`)
-      : new Error(`Could not find project '${repo}'. Check the spelling, or verify you have access (glab returned 404).`)
-  }
-  if (/HTTP 403|Forbidden/i.test(stderr)) {
-    return bin === 'gh'
-      ? new Error(`Access denied to '${repo}' webhooks. Your gh token likely needs the 'admin:repo_hook' scope. Run \`gh auth refresh -s admin:repo_hook\` and retry.`)
-      : new Error(`Access denied to '${repo}' hooks. Your glab token needs project maintainer/owner permission and the 'api' scope. Run \`glab auth login\` and retry.`)
-  }
-  if (/HTTP 401|Unauthorized|not logged in|authentication/i.test(stderr)) {
-    return new Error(`${bin} is not authenticated. Run \`${bin} auth login\` and retry.`)
-  }
+  if (/HTTP 404|Not Found/i.test(stderr)) return new Error(bin === 'gh' ? `Could not find repo '${repo}'. Check the spelling, or verify you have access (gh returned 404).` : `Could not find project '${repo}'. Check the spelling, or verify you have access (glab returned 404).`)
+  if (/HTTP 403|Forbidden/i.test(stderr)) return new Error(bin === 'gh' ? `Access denied to '${repo}' webhooks. Your gh token likely needs the 'admin:repo_hook' scope. Run \`gh auth refresh -s admin:repo_hook\` and retry.` : `Access denied to '${repo}' hooks. Your glab token needs project maintainer/owner permission and the 'api' scope. Run \`glab auth login\` and retry.`)
+  if (/HTTP 401|Unauthorized|not logged in|authentication/i.test(stderr)) return new Error(`${bin} is not authenticated. Run \`${bin} auth login\` and retry.`)
   return err instanceof Error ? err : new Error(`${bin} ${(err?.args ?? []).join(' ')} exited ${err?.code ?? '?'}: ${stderr.trim()}`)
 }
 
@@ -120,25 +107,19 @@ function codevIntegrate(root: string): void {
     // biome-ignore lint/suspicious/noExplicitAny: user-owned JSON
     const config: any = JSON.parse(readFileSync(codevPath, 'utf-8'))
     const architect = config?.shell?.architect
-    if (typeof architect !== 'string' || architect.length === 0) {
-      log(`.codev/config.json has no shell.architect — skipping (unexpected Codev shape)`)
-      return
+    if (typeof architect !== 'string' || !architect) log(`.codev/config.json has no shell.architect — skipping (unexpected Codev shape)`)
+    else if (architect.includes(CODEV_FLAG)) log(`.codev/config.json already loads ci channel — skipping`)
+    else {
+      config.shell.architect = `${architect} ${CODEV_FLAG}`
+      writeFileSync(codevPath, JSON.stringify(config, null, 2) + '\n')
+      log(`Updated .codev/config.json: architect session will now load ci channel`)
     }
-    if (architect.includes(CODEV_FLAG)) {
-      log(`.codev/config.json already loads ci channel — skipping`)
-      return
-    }
-    config.shell.architect = `${architect} ${CODEV_FLAG}`
-    writeFileSync(codevPath, JSON.stringify(config, null, 2) + '\n')
-    log(`Updated .codev/config.json: architect session will now load ci channel`)
-  } catch (err) {
-    log(`warning: Codev integration failed: ${(err as Error).message}. Webhook install succeeded; edit .codev/config.json manually to add ${CODEV_FLAG} to shell.architect.`)
-  }
+  } catch (err) { log(`warning: Codev integration failed: ${(err as Error).message}. Webhook install succeeded; edit .codev/config.json manually to add ${CODEV_FLAG} to shell.architect.`) }
 }
 
 export async function setup(argv: string[]): Promise<void> {
   try {
-    const { repo, forge, giteaUrl } = parseArgs(argv)
+    const { repo, forge, giteaUrl } = parseCommandArgs(argv, 'setup')
     const root = findProjectRoot()
     if (!root) {
       throw new Error('No project root found (no .git/ or .mcp.json in any ancestor). Run this from inside the project you want to install into.')
@@ -295,6 +276,124 @@ export async function setup(argv: string[]): Promise<void> {
     )
   } catch (err) {
     console.error(`[ci-channel] setup failed: ${(err as Error).message}`)
+    process.exit(1)
+  }
+}
+
+interface RemoveState { smeeUrl?: string; webhookSecret?: string }
+interface McpEntry { command?: unknown; args?: unknown }
+interface McpFile { mcpServers?: Record<string, McpEntry> }
+interface CodevConfig { shell?: { architect?: string } }
+interface Hook { id: number; url?: string; config?: { url?: string } }
+
+export async function remove(argv: string[]): Promise<void> {
+  try {
+    const { repo, forge, giteaUrl } = parseCommandArgs(argv, 'remove')
+    const root = findProjectRoot()
+    if (!root) throw new Error('No project root found (no .git/ or .mcp.json in any ancestor). Run this from inside the project you want to uninstall from.')
+    log(`Project root: ${root}`)
+    log(`Target repo:  ${repo}`)
+    const statePath = join(root, '.claude', 'channels', 'ci', 'state.json')
+    if (!existsSync(statePath)) throw new Error(`no ci-channel install detected in this project (no state.json at ${statePath}). Nothing to uninstall.`)
+    let state: RemoveState
+    try { state = JSON.parse(readFileSync(statePath, 'utf-8')) as RemoveState }
+    catch (e) { throw new Error(`state.json at ${statePath} is unreadable or malformed: ${(e as Error).message}. Fix or delete the file, then retry.`) }
+    const smeeUrl = state.smeeUrl
+    if (typeof smeeUrl !== 'string' || !smeeUrl) throw new Error(`state.json at ${statePath} is missing a 'smeeUrl' field. Cannot match webhook. If you want to force a reinstall, delete state.json and re-run \`ci-channel setup\`.`)
+    let giteaToken: string | undefined
+    if (forge === 'gitea') {
+      const envPath = join(root, '.claude', 'channels', 'ci', '.env')
+      giteaToken = (process.env.GITEA_TOKEN ?? '').trim() || (readEnvToken(envPath, 'GITEA_TOKEN') ?? '').trim() || undefined
+      if (!giteaToken) throw new Error(`GITEA_TOKEN not set. Generate a token at ${giteaUrl}/user/settings/applications (scopes: write:repository) and add it to ${envPath} as GITEA_TOKEN=... or export GITEA_TOKEN in your shell.`)
+    }
+    if (forge === 'github') {
+      log(`Listing existing webhooks on ${repo}...`)
+      let hooks: Hook[]
+      try { hooks = (JSON.parse(await cliApi('gh', ['api', '--paginate', '--slurp', `repos/${repo}/hooks`], null)) as Hook[][]).flat() }
+      catch (e) { throw classifyForgeError('gh', e, repo) }
+      const hit = hooks.find((h) => h?.config?.url === smeeUrl)
+      if (!hit) log(`no matching webhook found on github; skipping webhook delete`)
+      else {
+        log(`Found webhook ${hit.id} on ${repo} — deleting...`)
+        try { await cliApi('gh', ['api', '--method', 'DELETE', `repos/${repo}/hooks/${hit.id}`], null); log(`Deleted webhook ${hit.id}`) }
+        // biome-ignore lint/suspicious/noExplicitAny: subprocess error shape
+        catch (e) { if (/HTTP 404|Not Found/i.test(String((e as any)?.stderr ?? ''))) log(`webhook ${hit.id} already deleted; continuing`); else throw classifyForgeError('gh', e, repo) }
+      }
+    } else if (forge === 'gitlab') {
+      const enc = encodeURIComponent(repo)
+      log(`Listing existing hooks on ${repo}...`)
+      let hooks: Hook[]
+      try { hooks = JSON.parse(await cliApi('glab', ['api', `projects/${enc}/hooks`], null)) as Hook[] }
+      catch (e) { throw classifyForgeError('glab', e, repo) }
+      const hit = Array.isArray(hooks) ? hooks.find((h) => h?.url === smeeUrl) : undefined
+      if (!hit) log(`no matching webhook found on gitlab; skipping webhook delete`)
+      else {
+        log(`Found webhook ${hit.id} on ${repo} — deleting...`)
+        try { await cliApi('glab', ['api', '--method', 'DELETE', `projects/${enc}/hooks/${hit.id}`], null); log(`Deleted webhook ${hit.id}`) }
+        // biome-ignore lint/suspicious/noExplicitAny: subprocess error shape
+        catch (e) { if (/HTTP 404|Not Found/i.test(String((e as any)?.stderr ?? ''))) log(`webhook ${hit.id} already deleted; continuing`); else throw classifyForgeError('glab', e, repo) }
+      }
+    } else {
+      // gitea — LIST via giteaFetch (404 = hard fail); DELETE direct-fetch for 404-soft
+      const base = giteaUrl!.replace(/\/$/, '')
+      const url = `${base}/api/v1/repos/${repo}/hooks`
+      const authHdrs = { Authorization: `token ${giteaToken!}` }
+      log(`Listing existing hooks at ${url}...`)
+      const hooks = (await (await giteaFetch(url, { headers: authHdrs }, repo, base)).json()) as Hook[]
+      const hit = Array.isArray(hooks) ? hooks.find((h) => h?.config?.url === smeeUrl) : undefined
+      if (!hit) log(`no matching webhook found on gitea; skipping webhook delete`)
+      else {
+        log(`Found webhook ${hit.id} on ${repo} — deleting...`)
+        const ac = new AbortController()
+        const timer = setTimeout(() => ac.abort(), 10000)
+        let delResp: Response
+        try { delResp = await fetch(`${url}/${hit.id}`, { method: 'DELETE', headers: authHdrs, signal: ac.signal }) } finally { clearTimeout(timer) }
+        if (delResp.status === 404) log(`webhook ${hit.id} already deleted on gitea; continuing`)
+        else if (!delResp.ok) {
+          const body = await delResp.text().catch(() => '')
+          if (delResp.status === 403) throw new Error(`Access denied to '${repo}' hooks on ${base}. Your GITEA_TOKEN needs write:repository scope.`)
+          if (delResp.status === 401) throw new Error(`GITEA_TOKEN is invalid or expired. Generate a new one at ${base}/user/settings/applications.`)
+          throw new Error(`Gitea API error (status ${delResp.status}): ${body}`)
+        } else log(`Deleted webhook ${hit.id}`)
+      }
+    }
+    try { unlinkSync(statePath); log(`Deleted state.json`) }
+    // biome-ignore lint/suspicious/noExplicitAny: err is opaque
+    catch (e) { if ((e as any)?.code !== 'ENOENT') throw e; log(`state.json already gone`) }
+    const mcpPath = join(root, '.mcp.json')
+    if (!existsSync(mcpPath)) log(`no .mcp.json found — skipping`)
+    else {
+      const mcp = JSON.parse(readFileSync(mcpPath, 'utf-8')) as McpFile
+      const servers = mcp.mcpServers
+      if (servers == null || typeof servers !== 'object' || Array.isArray(servers)) log(`.mcp.json has no usable mcpServers object — skipping`)
+      else if (!('ci' in servers)) log(`no 'ci' entry in .mcp.json — skipping`)
+      else {
+        const entry = servers.ci
+        if (entry && typeof entry === 'object' && entry.command === 'npx' && Array.isArray(entry.args) && entry.args.includes('ci-channel')) {
+          delete servers.ci
+          writeFileSync(mcpPath, JSON.stringify(mcp, null, 2) + '\n')
+          log(`Removed 'ci' from ${mcpPath}`)
+        } else log(`warning: .mcp.json 'ci' entry not recognized — leaving alone`)
+      }
+    }
+    const codevPath = join(root, '.codev', 'config.json')
+    if (existsSync(codevPath)) {
+      try {
+        const config = JSON.parse(readFileSync(codevPath, 'utf-8')) as CodevConfig
+        const architect = config.shell?.architect
+        const needle = ` ${CODEV_FLAG}`
+        if (typeof architect !== 'string' || !architect) log(`.codev/config.json has no shell.architect — skipping (unexpected Codev shape)`)
+        else if (!architect.includes(needle)) log(`.codev/config.json does not load ci channel — nothing to revert`)
+        else {
+          config.shell!.architect = architect.replace(needle, '')
+          writeFileSync(codevPath, JSON.stringify(config, null, 2) + '\n')
+          log(`Reverted .codev/config.json: architect session will no longer load ci channel`)
+        }
+      } catch (e) { log(`warning: Codev revert failed: ${(e as Error).message}. Other cleanup succeeded; edit .codev/config.json manually to remove ${CODEV_FLAG} from shell.architect.`) }
+    }
+    console.log(`\nDone. ci-channel removed from ${repo}.`)
+  } catch (err) {
+    console.error(`[ci-channel] remove failed: ${(err as Error).message}`)
     process.exit(1)
   }
 }

@@ -65,6 +65,10 @@ claude --dangerously-load-development-channels server:ci
 
 For Codev projects, the installer additionally updates `.codev/config.json` to append the channel loader flag to `shell.architect`.
 
+### Uninstall
+
+Run `ci-channel remove --repo OWNER/REPO` (same `--forge gitlab|gitea` and `--gitea-url URL` flags as setup) to reverse the install — deletes the forge webhook, removes `state.json`, strips the canonical `ci` entry from `.mcp.json`, and reverts the Codev integration if present.
+
 ### Manual / advanced
 
 See `INSTALL.md`.
