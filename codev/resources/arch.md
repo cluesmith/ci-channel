@@ -38,7 +38,7 @@ ci-channel/
 │   ├── notify.ts              # Notification formatting, sanitization, MCP push
 │   ├── reconcile.ts           # Startup reconciliation orchestration
 │   ├── project-root.ts        # Walk-up project root discovery (.mcp.json / .git)
-│   └── setup.ts               # `ci-channel setup --repo owner/repo` installer (Spec 5)
+│   └── setup.ts               # `ci-channel setup` installer — multi-forge + Codev auto-integration (Spec 5 + Spec 7)
 ├── tests/
 │   ├── forges/
 │   │   ├── gitlab.test.ts     # GitLab forge unit tests
@@ -167,14 +167,21 @@ Exports `runCommand(args, timeoutMs)` — spawns a CLI command with timeout, ret
 
 ### Installer (`lib/setup.ts`)
 
-**Purpose**: Implements the `ci-channel setup --repo owner/repo` subcommand. A deliberately single-file, non-DI, ≤150-line implementation that performs the five install operations (generate/load secret, fetch/load smee URL, write state.json, create/update GitHub webhook via `gh api`, register `ci` in `.mcp.json`) and exits. Spec 5 constrains the file rigidly after Spec 3's 4,385-line attempt was abandoned — see `codev/resources/lessons-learned.md` entry "Prefer single-file implementations + real-fs tests for install/bootstrap commands."
+**Purpose**: Implements the `ci-channel setup` subcommand. A deliberately single-file, non-DI, ≤300-line implementation that performs the install operations (generate/load secret, fetch/load smee URL, write state.json, create/update forge webhook, register `ci` in `.mcp.json`, optionally update Codev `shell.architect`) and exits. Spec 5 constrained the file rigidly after Spec 3's 4,385-line attempt was abandoned; Spec 7 loosened the cap to 300 lines to fit multi-forge support (GitHub + GitLab + Gitea) and Codev auto-integration without splitting. See `codev/resources/lessons-learned.md` entry "Prefer single-file implementations + real-fs tests for install/bootstrap commands."
+
+**Supported forges (Spec 7)**: the CLI accepts `--forge github|gitlab|gitea` (default `github`). Each forge branch shares the same common flow (parse args → project root → [Gitea-only token check] → load state → generate secret → fetch smee → write state → forge API call → `.mcp.json` merge → Codev integration → done). The only per-forge divergence is the "forge API call" step:
+- **GitHub**: `gh api repos/OWNER/REPO/hooks` via subprocess, POST/PATCH with canonical webhook payload
+- **GitLab**: `glab api projects/ENCODED_PATH/hooks` via subprocess, POST/**PUT** (not PATCH) with the `pipeline_events: true`, `push_events: false`, ... payload. `path_with_namespace` is URL-encoded via `encodeURIComponent` so nested subgroups work.
+- **Gitea**: global `fetch` against `{gitea-url}/api/v1/repos/OWNER/REPO/hooks`, POST/PATCH with a GitHub-like `config.url/secret/content_type` payload. `type: "gitea"` is ONLY on the POST body (Gitea's update endpoint rejects it). Requires `GITEA_TOKEN` from `process.env` or `<project>/.claude/channels/ci/.env` — the only exception to state-first ordering is this fail-fast token check, which runs BEFORE smee/state provisioning so a missing token doesn't burn a smee channel.
 
 **Design choices worth knowing about**:
-- **No DI**: calls `fs`, `spawn`, `fetch` (via `fetchSmeeChannel`) directly. Tests use a PATH-override fake `gh` binary and prepopulate state.json to skip the smee fetch path.
-- **State-first ordering**: state.json is written before any webhook API call on all paths where a write is needed, so a partial failure leaves the secret/URL persisted for the next run.
+- **No DI**: calls `fs`, `spawn`, `fetch` (via `fetchSmeeChannel`) directly. Tests use a PATH-override fake `gh`/`glab` binary and a local `http.createServer` for Gitea, and prepopulate state.json to skip the smee fetch path.
+- **State-first ordering**: state.json is written before any webhook API call on all paths where a write is needed, so a partial failure leaves the secret/URL persisted for the next run. (Exception: Gitea token validation runs before state provisioning — see above.)
 - **Conditional write**: state.json is only written when the computed desired state deep-differs from what's on disk (checked by `webhookSecret` + `smeeUrl` field equality plus `Object.keys(existing).length === 2`). This is a correctness check, not a speed optimization — it avoids mtime churn on idempotent re-runs.
 - **Key-presence `.mcp.json` merge**: if `mcpServers.ci` is present (regardless of contents), the file is left alone. This respects user customizations like manually adding `--repos` to `args`.
-- **Always-PATCH**: when a matching webhook is found by URL, the installer PATCHes it with the canonical payload unconditionally. No "skip if already correct" fast path.
+- **Always-PATCH/PUT**: when a matching webhook is found by URL, the installer updates it with the canonical payload unconditionally. No "skip if already correct" fast path.
+- **Codev auto-integration (Spec 7)**: after the core install, if `<project>/.codev/config.json` exists, the installer appends `--dangerously-load-development-channels server:ci` to `shell.architect` (idempotent — substring check). Wrapped in a local `try/catch` that warns and exits 0 on failure — the webhook is already live by this point, so a malformed Codev config should not report "setup failed."
+- **Shared error classification**: `classifyForgeError(bin, err, repo)` maps 404/403/401/ENOENT from `gh` or `glab` stderr to user-friendly error messages. Gitea uses `giteaFetch(url, init, repo, base)` which does the equivalent classification from HTTP status codes.
 
 **Dispatch**: `server.ts` checks `process.argv[2] === 'setup'` as a 5-line block before `loadConfig()` and dynamically imports `./lib/setup.js`. Everything else on the CLI (forges, flags) passes through unchanged.
 

@@ -5,27 +5,39 @@ Step-by-step instructions for an LLM agent to install and configure ci-channel.
 ## Prerequisites
 
 - Node.js v20.17.0+
-- `gh` CLI installed and authenticated (`gh auth status`). For GitLab use `glab`, for Gitea the installer is not supported — use the manual flow below.
+- A forge-specific CLI or token:
+  - **GitHub**: `gh` CLI installed and authenticated (`gh auth status`)
+  - **GitLab**: `glab` CLI installed and authenticated (`glab auth status`)
+  - **Gitea**: a `GITEA_TOKEN` with `write:repository` scope, exported in your shell or written to `<project-root>/.claude/channels/ci/.env`
 - Claude Code v2.1.80+ with channels support
 
-## Quick Path: `ci-channel setup` (recommended, GitHub only)
+## Quick Path: `ci-channel setup` (recommended for all three forges)
 
 One command from inside the project you want to monitor:
 
 ```bash
+# GitHub (default)
 cd /path/to/target-project
 npx -y ci-channel setup --repo OWNER/REPO
+
+# GitLab
+npx -y ci-channel setup --forge gitlab --repo GROUP/PROJECT
+
+# Gitea
+npx -y ci-channel setup --forge gitea --gitea-url https://gitea.example.com --repo OWNER/REPO
 ```
 
 That's the entire install. The command:
 
 1. Walks up from the current directory to find the project root (nearest `.mcp.json` or `.git/`)
-2. Generates a webhook secret (if one is not already stored)
-3. Provisions a smee.io relay URL (if one is not already stored)
-4. Writes `<project-root>/.claude/channels/ci/state.json` with mode `0o600` (skipped if the file is already deep-equal to the desired state)
-5. Creates a GitHub webhook via `gh api` pointing at the smee URL (or PATCHes an existing one with the same URL so its secret matches our state)
-6. Adds `mcpServers.ci` to `<project-root>/.mcp.json` (creates the file if missing; leaves any existing `ci` entry alone so user customizations are preserved)
-7. Prints `Done. Launch Claude Code with \`claude --dangerously-load-development-channels server:ci\`.` and exits 0
+2. For Gitea: validates `GITEA_TOKEN` is set (fails fast before any state is written if missing)
+3. Generates a webhook secret (if one is not already stored)
+4. Provisions a smee.io relay URL (if one is not already stored)
+5. Writes `<project-root>/.claude/channels/ci/state.json` with mode `0o600` (skipped if the file is already deep-equal to the desired state)
+6. Creates or updates the forge webhook (`gh api` for GitHub, `glab api` for GitLab, `fetch` against the Gitea REST API for Gitea) — always-PATCH/PUT existing hooks so the secret matches our state
+7. Adds `mcpServers.ci` to `<project-root>/.mcp.json` (creates the file if missing; leaves any existing `ci` entry alone so user customizations are preserved)
+8. If `<project-root>/.codev/config.json` exists, appends the channel loader flag to `shell.architect` (once, idempotent)
+9. Prints `Done. Launch Claude Code with \`claude --dangerously-load-development-channels server:ci\`.` and exits 0
 
 Then launch Claude Code with the channel enabled:
 
@@ -33,19 +45,20 @@ Then launch Claude Code with the channel enabled:
 claude --dangerously-load-development-channels server:ci
 ```
 
-Re-running `ci-channel setup --repo OWNER/REPO` is idempotent. If anything fails mid-way (e.g., `gh api` returns non-zero), fix the underlying problem and re-run — no state gets into an inconsistent position.
+Re-running the setup command is idempotent on all three forges. If anything fails mid-way (e.g., `gh api` returns non-zero), fix the underlying problem and re-run — no state gets into an inconsistent position.
 
 **Current limitations**:
-- GitHub only. GitLab and Gitea users must use the manual flow below.
-- No `--yes`, `--dry-run`, or `--smee-url` flags — running the command IS the confirmation. Edit `state.json` by hand if you need a specific smee channel.
+- No `--yes`, `--dry-run`, `--rotate`, or `--smee-url` flags — running the command IS the confirmation. Edit `state.json` by hand if you need a specific smee channel.
 - The installer requires a detectable project root; it does NOT fall back to `~/.claude/channels/ci/` the way the runtime plugin does.
+- **GitLab**: for self-hosted GitLab, point `glab` at your instance (`glab auth login` / `GITLAB_URI`) before running setup. We don't take a `--gitlab-url` flag.
+- **Gitea**: if `GITEA_TOKEN` is missing from both `process.env` and `<project-root>/.claude/channels/ci/.env`, the installer fails fast before touching `state.json` or smee.io.
 
-## Manual Path: Step by step (advanced / GitLab / Gitea)
+## Manual Path: Step by step (advanced)
 
 Use this flow if:
-- You need to install for GitLab or Gitea
-- You want to understand exactly what's happening
+- You want to understand exactly what's happening under the hood
 - The one-command flow failed and you're debugging
+- You have non-standard requirements the one-command flow doesn't cover (custom smee channel, pre-existing webhook, shared state across projects, etc.)
 
 ### Step 1: Register the MCP server in the project you want to monitor
 
