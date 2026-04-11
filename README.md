@@ -30,26 +30,44 @@ Forge (GitHub/GitLab/Gitea)
 └───────────────────┘
 ```
 
-## Zero-Config Quick Start
+## Quick Start (One Command)
 
-> **NOTE:** Claude Channels is still a new feature so config is a bit complicated.
->
+Run this from inside the project you want to monitor:
+
+```bash
+cd /path/to/your-project
+npx -y ci-channel setup --repo owner/your-project
+```
+
+That's it. The installer:
+1. Generates a webhook secret
+2. Provisions a smee.io relay channel
+3. Writes `<project-root>/.claude/channels/ci/state.json` (mode `0o600`)
+4. Creates the GitHub webhook via `gh api`
+5. Registers the `ci` MCP server in `<project-root>/.mcp.json`
+
+Then launch Claude Code with the channel enabled:
+
+```bash
+claude --dangerously-load-development-channels server:ci
+```
+
+**Requires**: `gh` CLI installed and authenticated (`gh auth status`). Re-running the command is idempotent — safe to run multiple times.
+
+GitHub-only in v0.3.0. For GitLab/Gitea, use the [manual setup flow](#manual-setup-advanced--gitlab--gitea) below.
+
 > **LLM agents**: See [INSTALL.md](INSTALL.md) for step-by-step installation instructions designed for AI agents to follow programmatically.
 
-The plugin auto-generates a webhook secret and provisions a smee.io relay on first run. You just need to:
+## Manual Setup (advanced / GitLab / Gitea)
+
+If you prefer to wire things up by hand — or you're installing against GitLab/Gitea — use the following two-step flow.
 
 ### 1. Register the MCP server in your project
-
-From the project you want to monitor:
 
 ```bash
 cd /path/to/your-project
 claude mcp add-json --scope project ci '{"command":"npx","args":["-y","ci-channel"]}'
 ```
-
-This adds ci-channel to your project's `.mcp.json`. `npx` downloads and runs it on first invocation — no clone or local install required. Each project gets its own dedicated smee channel and webhook — no cross-talk between projects.
-
-> **Installing from source instead?** See [Development Setup](#development-setup) at the bottom of this doc.
 
 ### 2. Start Claude Code with the channel enabled
 
@@ -57,19 +75,9 @@ This adds ci-channel to your project's `.mcp.json`. `npx` downloads and runs it 
 claude --dangerously-load-development-channels server:ci
 ```
 
-On first run, the plugin:
-1. Generates a `WEBHOOK_SECRET` and provisions a smee.io relay channel
-2. Saves auto-provisioned state to `<project-root>/.claude/channels/ci/state.json` (per-project, persists across restarts)
-3. Sends a channel notification to Claude with the webhook URL and secret:
+On first run, the plugin auto-generates a webhook secret and provisions a smee.io relay channel, saves them to `<project-root>/.claude/channels/ci/state.json`, and pushes a channel notification to Claude with the credentials you need for the next step.
 
-```
-CI channel ready. Configure your forge webhook:
-  URL: https://smee.io/abc123
-  Secret: a1b2c3d4...
-  Events: Workflow runs (GitHub/Gitea) or Pipeline events (GitLab)
-```
-
-### 3. Configure your forge webhook (one-time)
+### 3. Configure your forge webhook
 
 Copy the URL and secret from the notification and configure your forge's webhook. For GitHub, you can use the `gh` CLI:
 
@@ -87,7 +95,7 @@ gh api repos/OWNER/REPO/hooks --method POST --input - <<'EOF'
 EOF
 ```
 
-Or configure it manually in the GitHub UI (see [Per-Forge Setup Guides](#per-forge-setup-guides) below).
+Or configure it manually in the forge UI (see [Per-Forge Setup Guides](#per-forge-setup-guides) below).
 
 That's it. No `.env` file to create manually, no browser visit to smee.io.
 
@@ -95,7 +103,9 @@ That's it. No `.env` file to create manually, no browser visit to smee.io.
 
 ### GitHub Actions
 
-**Setup** (run from your project directory):
+**Recommended**: use the one-command installer from [Quick Start](#quick-start-one-command).
+
+**Manual setup** (run from your project directory):
 ```bash
 claude mcp add-json --scope project ci '{"command":"npx","args":["-y","ci-channel"]}'
 claude --dangerously-load-development-channels server:ci
@@ -199,10 +209,10 @@ GITEA_TOKEN=your-gitea-api-token
 
 If you use [Codev](https://github.com/cluesmith/codev) for AI-assisted development, you can add ci-channel to your architect session so CI notifications arrive while you work.
 
-**Step 1: Register the MCP server in your Codev project:**
+**Step 1: Run the installer in your Codev project:**
 ```bash
 cd /path/to/your-codev-project
-claude mcp add-json --scope project ci '{"command":"npx","args":["-y","ci-channel"]}'
+npx -y ci-channel setup --repo owner/your-codev-project
 ```
 
 **Step 2: Update `.codev/config.json`** to add the channel flag to the architect command:
@@ -218,18 +228,11 @@ claude mcp add-json --scope project ci '{"command":"npx","args":["-y","ci-channe
 
 The architect session will now receive CI notifications in real-time. Builders don't need the channel — they focus on implementation.
 
-**Step 3: Configure the webhook** for your repo (see [Quick Start](#zero-config-quick-start) step 4).
-
-**Filtering**: Project scope naturally isolates each project, but if you want to further limit notifications to specific repos, add `--repos` to the MCP server args:
-```bash
-claude mcp add-json --scope project ci '{"command":"npx","args":["-y","ci-channel","--repos","your-org/your-repo"]}'
-```
-
 ## Configuration Reference
 
 Configuration uses CLI args (passed in the `args` array when registering the MCP server) for structural settings, and `<project-root>/.claude/channels/ci/.env` for secrets. Auto-provisioned state (generated secret, smee URL) is persisted to `<project-root>/.claude/channels/ci/state.json`. Each project is fully isolated.
 
-**Project root detection**: ci-channel walks up from `process.cwd()` looking for `.mcp.json` or `.git/` to find the project root. Falls back to the legacy global path `~/.claude/channels/ci/` if neither is found (for backward compatibility).
+**Project root detection**: ci-channel walks up from `process.cwd()` looking for `.mcp.json` or `.git/` to find the project root. The runtime plugin falls back to the legacy global path `~/.claude/channels/ci/` if neither is found (for backward compatibility). The `ci-channel setup` installer does NOT fall back — it requires a detectable project root and errors out if none is found.
 
 Precedence: CLI args > env vars > `.env` file > `state.json`.
 

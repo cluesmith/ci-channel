@@ -1,8 +1,10 @@
 # ci-channel - Claude Code Instructions
 
+> **Note**: This is the Claude Code-specific version. A near-identical version is maintained at `AGENTS.md` following the [AGENTS.md standard](https://agents.md/) for cross-tool compatibility with Cursor, GitHub Copilot, and other AI coding assistants. Keep the two files in sync.
+
 ## Project Overview
 
-A Claude Code channel plugin that delivers real-time CI/CD notifications into running Claude Code sessions. Supports GitHub Actions, GitLab CI, and Gitea Actions. Built with the MCP (Model Context Protocol) SDK.
+A Claude Code channel plugin that delivers real-time CI/CD notifications into running Claude Code sessions. Supports **GitHub Actions**, **GitLab CI**, and **Gitea Actions**. Built with the MCP (Model Context Protocol) SDK and published on npm as `ci-channel`.
 
 This project uses **[Codev](https://github.com/cluesmith/codev)** for AI-assisted development.
 
@@ -11,29 +13,29 @@ This project uses **[Codev](https://github.com/cluesmith/codev)** for AI-assiste
 See `codev/resources/arch.md` for the full architecture document.
 
 **Key components:**
-- `server.ts` — MCP server entry point (HTTP server, bootstrap, smee in-process, reconciliation)
-- `lib/forge.ts` — Forge interface definition (strategy pattern for multi-forge support)
-- `lib/forges/github.ts` — GitHub Actions forge (HMAC-SHA256, workflow_run, gh CLI)
-- `lib/forges/gitlab.ts` — GitLab CI forge (token validation, Pipeline Hook, glab CLI)
-- `lib/forges/gitea.ts` — Gitea Actions forge (HMAC-SHA256, workflow_run, fetch API)
-- `lib/config.ts` — Configuration loading (CLI args + env vars + .env file)
+- `server.ts` — MCP server entry point + `setup` subcommand dispatch
+- `lib/forge.ts` — Forge interface (strategy pattern for multi-forge support)
+- `lib/forges/github.ts` — GitHub Actions forge (HMAC-SHA256, `workflow_run`, `gh` CLI)
+- `lib/forges/gitlab.ts` — GitLab CI forge (token validation, Pipeline Hook, `glab` CLI)
+- `lib/forges/gitea.ts` — Gitea Actions forge (HMAC-SHA256, `workflow_run`, fetch API)
+- `lib/config.ts` — Configuration loading (CLI args + env vars + `.env` file)
 - `lib/bootstrap.ts` — First-run auto-provisioning (secret generation, smee channel, setup notification)
 - `lib/handler.ts` — Webhook handler pipeline (validate → dedup → filter → notify)
-- `lib/webhook.ts` — WebhookEvent interface, deduplication, filtering (forge-agnostic)
-- `lib/notify.ts` — Notification formatting and input sanitization
-- `lib/reconcile.ts` — Startup reconciliation orchestration
+- `lib/webhook.ts` — Signature validation, event parsing, deduplication
+- `lib/notify.ts` — Notification formatting and sanitization
+- `lib/reconcile.ts` — Startup reconciliation and job enrichment
+- `lib/project-root.ts` — Walk-up project root detection (`.mcp.json` / `.git`)
+- `lib/state.ts` — Plugin state persistence (`state.json` read/write)
+- `lib/setup.ts` — `ci-channel setup --repo OWNER/REPO` installer (Spec 5, ≤150 lines, single file, no DI)
 
 ## Configuration
 
-**State is project-scoped** as of v0.2.0. Each project gets its own `<project-root>/.claude/channels/ci/state.json` and `<project-root>/.claude/channels/ci/.env`. Project root is detected by walking up from `process.cwd()` looking for `.mcp.json` or `.git/` (see `lib/project-root.ts`). The legacy global path `~/.claude/channels/ci/` is only used as a fallback when no project root is detectable.
+**State is project-scoped** as of v0.2.0. Each project gets its own `<project-root>/.claude/channels/ci/state.json` and `<project-root>/.claude/channels/ci/.env`. Project root is detected via `findProjectRoot()` (walks up for `.mcp.json` or `.git/`).
 
-Structural config via CLI args in `.mcp.json`; secrets in `<project-root>/.claude/channels/ci/.env`; auto-provisioned state in `<project-root>/.claude/channels/ci/state.json`.
-
-**CLI args**: `--forge`, `--repos`, `--workflow-filter`, `--reconcile-branches`, `--port`, `--gitea-url`, `--smee-url`
-
-**Secrets**: `WEBHOOK_SECRET` (auto-generated), `GITEA_TOKEN`
-
-**Precedence**: CLI args > env vars > `.env` file > `state.json`
+- **Structural config**: CLI args in `.mcp.json` — `--forge`, `--repos`, `--workflow-filter`, `--reconcile-branches`, `--port`, `--gitea-url`, `--smee-url`
+- **Secrets**: `<project-root>/.claude/channels/ci/.env` — `WEBHOOK_SECRET`, `GITEA_TOKEN`
+- **Auto-provisioned state**: `<project-root>/.claude/channels/ci/state.json` — generated secret + smee URL
+- **Precedence**: CLI args > env vars > `.env` file > `state.json`
 
 ## Key Locations
 
@@ -43,6 +45,20 @@ Structural config via CLI args in `.mcp.json`; secrets in `<project-root>/.claud
 - **Architecture**: `codev/resources/arch.md` — System architecture
 - **Lessons Learned**: `codev/resources/lessons-learned.md` — Extracted insights
 
+## Installation
+
+### Recommended (GitHub)
+
+```bash
+cd /path/to/your-project
+npx -y ci-channel setup --repo OWNER/REPO
+claude --dangerously-load-development-channels server:ci
+```
+
+### Manual (GitLab / Gitea / advanced)
+
+See `INSTALL.md`.
+
 ## Development
 
 ```bash
@@ -51,6 +67,8 @@ npm test             # Run all tests
 npm run build        # Compile TypeScript to dist/ (for publishing)
 npx tsx server.ts    # Start the server directly from source
 ```
+
+The `setup` subcommand source lives in `lib/setup.ts`. Dispatch happens at the top of `server.ts` after imports but before `loadConfig()`, via a dynamic `import('./lib/setup.js')` so installer-only execution doesn't load server config.
 
 ## Codev Workflow
 
@@ -72,14 +90,15 @@ Codev provides three CLI tools:
 
 Commit message format:
 ```
-[Spec 1] Description of change
-[Spec 1][Phase: implement] feat: Add feature
+[Spec N] Description of change
+[Spec N][Phase: implement] feat: Add feature
 ```
 
 ## Critical Patterns
 
-- **MCP stdio isolation**: All subprocess calls must use `stdin: 'ignore'` to prevent consuming MCP stdin bytes. See `codev/resources/lessons-learned.md`.
-- **Sanitize at the boundary**: All user-controlled input (commit messages, branch names) must be sanitized in `notify.ts` before reaching MCP.
-- **Never block on enrichment**: Job-detail enrichment is fire-and-forget, never blocks the primary notification.
+- **MCP stdio isolation**: Subprocesses spawned by the running MCP server must not inherit `process.stdin` (or they'd steal bytes from the JSON-RPC stream). Default pattern: `stdin: 'ignore'`. Exception: `ci-channel setup`'s `gh api --input -` call uses `stdio: ['pipe', 'pipe', 'pipe']` — a dedicated pipe, still not inheriting `process.stdin`. The rule is "don't inherit `process.stdin`", not literally "`stdin: 'ignore'` everywhere".
+- **Sanitize at the boundary**: All user-controlled input (commit messages, branch names) sanitized in `notify.ts` before reaching MCP
+- **Never block on enrichment**: Job-detail enrichment is fire-and-forget, never blocks the primary notification
 - **Forge strategy pattern**: All forge-specific behavior (signature validation, event parsing, reconciliation, enrichment) goes in `lib/forges/`. The handler and reconciler are forge-agnostic.
-- **Bootstrap auto-provisioning**: Secret and smee channel are auto-generated on first run. Setup instructions pushed via channel notification.
+- **Fail fast**: Missing required config throws immediately, no silent fallbacks
+- **Installer rules (lib/setup.ts)**: single file, no dependency injection, no helper modules, no `@inquirer/prompts` or interactive prompts, always-PATCH existing webhooks (no "skip if already correct" fast path), state-first ordering (write `state.json` before webhook API calls)

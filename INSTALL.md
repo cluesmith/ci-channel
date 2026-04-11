@@ -4,11 +4,50 @@ Step-by-step instructions for an LLM agent to install and configure ci-channel.
 
 ## Prerequisites
 
-- Node.js v20+
-- `gh` CLI installed and authenticated
+- Node.js v20.17.0+
+- `gh` CLI installed and authenticated (`gh auth status`). For GitLab use `glab`, for Gitea the installer is not supported — use the manual flow below.
 - Claude Code v2.1.80+ with channels support
 
-## Step 1: Register the MCP server in the project you want to monitor
+## Quick Path: `ci-channel setup` (recommended, GitHub only)
+
+One command from inside the project you want to monitor:
+
+```bash
+cd /path/to/target-project
+npx -y ci-channel setup --repo OWNER/REPO
+```
+
+That's the entire install. The command:
+
+1. Walks up from the current directory to find the project root (nearest `.mcp.json` or `.git/`)
+2. Generates a webhook secret (if one is not already stored)
+3. Provisions a smee.io relay URL (if one is not already stored)
+4. Writes `<project-root>/.claude/channels/ci/state.json` with mode `0o600` (skipped if the file is already deep-equal to the desired state)
+5. Creates a GitHub webhook via `gh api` pointing at the smee URL (or PATCHes an existing one with the same URL so its secret matches our state)
+6. Adds `mcpServers.ci` to `<project-root>/.mcp.json` (creates the file if missing; leaves any existing `ci` entry alone so user customizations are preserved)
+7. Prints `Done. Launch Claude Code with \`claude --dangerously-load-development-channels server:ci\`.` and exits 0
+
+Then launch Claude Code with the channel enabled:
+
+```bash
+claude --dangerously-load-development-channels server:ci
+```
+
+Re-running `ci-channel setup --repo OWNER/REPO` is idempotent. If anything fails mid-way (e.g., `gh api` returns non-zero), fix the underlying problem and re-run — no state gets into an inconsistent position.
+
+**Current limitations**:
+- GitHub only. GitLab and Gitea users must use the manual flow below.
+- No `--yes`, `--dry-run`, or `--smee-url` flags — running the command IS the confirmation. Edit `state.json` by hand if you need a specific smee channel.
+- The installer requires a detectable project root; it does NOT fall back to `~/.claude/channels/ci/` the way the runtime plugin does.
+
+## Manual Path: Step by step (advanced / GitLab / Gitea)
+
+Use this flow if:
+- You need to install for GitLab or Gitea
+- You want to understand exactly what's happening
+- The one-command flow failed and you're debugging
+
+### Step 1: Register the MCP server in the project you want to monitor
 
 From the project directory you want to monitor:
 
@@ -23,7 +62,7 @@ claude mcp add-json --scope project ci '{"command":"npx","args":["-y","ci-channe
 
 > **Project-scoped servers need explicit approval.** After `claude mcp add-json --scope project`, the server is dormant until you either (a) approve it via `/mcp` inside a Claude Code session, or (b) add the key to `enabledMcpjsonServers` in `~/.claude.json`. Install can appear to succeed while the server silently stays unloaded. If unsure, use `--scope user` instead.
 
-## Step 2: Launch Claude Code once to trigger auto-provisioning
+### Step 2: Launch Claude Code once to trigger auto-provisioning
 
 ```bash
 claude --dangerously-load-development-channels server:ci
@@ -31,7 +70,7 @@ claude --dangerously-load-development-channels server:ci
 
 On first launch, the plugin generates a webhook secret and provisions a smee.io relay URL, saving them to `.claude/channels/ci/state.json`. Exit Claude Code after startup completes.
 
-## Step 3: Read the auto-provisioned credentials
+### Step 3: Read the auto-provisioned credentials
 
 ```bash
 cat .claude/channels/ci/state.json
@@ -41,7 +80,7 @@ This returns JSON with `webhookSecret` and `smeeUrl` fields.
 
 If `.claude/channels/ci/.env` exists with `WEBHOOK_SECRET` and `SMEE_URL` already set, use those values instead.
 
-## Step 4: Create the GitHub webhook
+### Step 4: Create the GitHub webhook
 
 Use the `gh` CLI to create the webhook programmatically. Replace `OWNER/REPO` with the target repository, and substitute the smee URL and secret from step 3:
 
@@ -65,7 +104,7 @@ Verify the webhook was created:
 gh api repos/OWNER/REPO/hooks --jq '.[].config.url'
 ```
 
-## Step 5: Relaunch Claude Code with the channel
+### Step 5: Relaunch Claude Code with the channel
 
 ```bash
 claude --dangerously-load-development-channels server:ci
@@ -73,7 +112,7 @@ claude --dangerously-load-development-channels server:ci
 
 The channel is now active. CI failure notifications will be pushed into the session automatically.
 
-## GitLab CI variant
+### GitLab CI variant
 
 Replace step 1 with:
 
@@ -88,7 +127,7 @@ For the webhook (step 4), use the GitLab API or UI:
 
 Optional: Install `glab` CLI for reconciliation and job enrichment.
 
-## Gitea Actions variant
+### Gitea Actions variant
 
 Replace step 1 with:
 
@@ -109,7 +148,7 @@ For the webhook (step 4), configure in Gitea UI:
 
 ## Verification
 
-After setup, you can verify the channel is working:
+After setup, verify the channel is working:
 
 1. The `ci` MCP server should appear in `claude mcp list`
 2. Trigger a CI failure (e.g., push a commit with a broken test)
@@ -124,3 +163,7 @@ After setup, you can verify the channel is working:
 **Install appears to succeed but no notifications arrive** — If you used `--scope project`, the server is dormant until approved. Run `claude mcp list` to confirm it shows `Connected`; if it's missing, approve it via `/mcp` inside a session, or re-register with `--scope user`.
 
 **No `state.json` after first launch** — The plugin writes credentials only when bootstrap completes. Check stderr for `[ci-channel] Saved auto-provisioned state to state.json`. If you see `smee.io timed out` instead, your network may be blocking smee.io.
+
+**`ci-channel setup` exits with "No project root found"** — The installer walks up from `process.cwd()` looking for `.mcp.json` or `.git/`. If neither is found in any ancestor directory, the installer refuses to guess. Run it from inside a real project (one with a git repo or an existing `.mcp.json`).
+
+**`ci-channel setup` exits with a `gh` error** — The installer shells out to `gh api`. If `gh` is not installed, not on PATH, not authenticated, or lacks `admin:repo_hook` scope on your token, the error is surfaced verbatim. Run `gh auth status` to verify your session, and `gh auth refresh -s admin:repo_hook` if the scope is missing.
