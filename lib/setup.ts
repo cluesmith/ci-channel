@@ -8,6 +8,8 @@ import { loadState } from './state.js'
 
 const CI_MCP_ENTRY = { command: 'npx', args: ['-y', 'ci-channel'] }
 
+const log = (msg: string) => console.error(`[ci-channel] ${msg}`)
+
 function parseArgs(argv: string[]): { repo: string } {
   let repo: string | undefined
   for (let i = 0; i < argv.length; i++) {
@@ -22,6 +24,25 @@ function parseArgs(argv: string[]): { repo: string } {
   return { repo }
 }
 
+class GhError extends Error {
+  constructor(
+    public readonly code: number,
+    public readonly stderr: string,
+    public readonly command: string,
+  ) {
+    super(`gh ${command} exited ${code}: ${stderr.trim()}`)
+  }
+  get is404(): boolean {
+    return /HTTP 404|Not Found/i.test(this.stderr)
+  }
+  get is403(): boolean {
+    return /HTTP 403|Forbidden/i.test(this.stderr)
+  }
+  get isAuth(): boolean {
+    return /authentication|not logged in|401/i.test(this.stderr)
+  }
+}
+
 function ghApi(args: string[], stdinBody: string | null): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn('gh', args, { stdio: ['pipe', 'pipe', 'pipe'] })
@@ -33,12 +54,18 @@ function ghApi(args: string[], stdinBody: string | null): Promise<string> {
     child.stderr.on('data', (chunk) => {
       stderr += chunk
     })
-    child.on('error', reject)
+    child.on('error', (err) => {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        reject(new Error('gh CLI not found. Install from https://cli.github.com/ and run `gh auth login`.'))
+      } else {
+        reject(err)
+      }
+    })
     child.on('close', (code) => {
       if (code === 0) {
         resolve(stdout)
       } else {
-        reject(new Error(`gh ${args.join(' ')} exited ${code}: ${stderr.trim()}`))
+        reject(new GhError(code ?? -1, stderr, args.join(' ')))
       }
     })
     child.stdin.end(stdinBody ?? '')
@@ -50,18 +77,33 @@ export async function setup(argv: string[]): Promise<void> {
     const { repo } = parseArgs(argv)
     const root = findProjectRoot()
     if (!root) {
-      throw new Error('No project root found (no .git/ or .mcp.json in any ancestor)')
+      throw new Error('No project root found (no .git/ or .mcp.json in any ancestor). Run this from inside the project you want to install into.')
     }
+    log(`Project root: ${root}`)
+    log(`Target repo:  ${repo}`)
+
     const statePath = join(root, '.claude', 'channels', 'ci', 'state.json')
     const existing = loadState(statePath)
-    const secret = existing.webhookSecret ?? randomBytes(32).toString('hex')
+
+    let secret = existing.webhookSecret
+    if (!secret) {
+      secret = randomBytes(32).toString('hex')
+      log('Generated new webhook secret')
+    } else {
+      log('Reusing existing webhook secret from state.json')
+    }
+
     let smeeUrl = existing.smeeUrl
     if (!smeeUrl) {
+      log('Provisioning smee.io channel...')
       const fetched = await fetchSmeeChannel()
       if (!fetched) {
-        throw new Error('Failed to provision smee.io channel')
+        throw new Error('Failed to provision smee.io channel (smee.io unreachable or returned no Location header)')
       }
       smeeUrl = fetched
+      log(`Provisioned smee channel: ${smeeUrl}`)
+    } else {
+      log(`Reusing existing smee channel: ${smeeUrl}`)
     }
 
     // Correctness check, not speed optimization. PluginState has exactly
@@ -75,12 +117,32 @@ export async function setup(argv: string[]): Promise<void> {
       const desired = { webhookSecret: secret, smeeUrl }
       mkdirSync(dirname(statePath), { recursive: true })
       writeFileSync(statePath, JSON.stringify(desired, null, 2) + '\n', { mode: 0o600 })
+      log(`Wrote ${statePath} (mode 0o600)`)
+    } else {
+      log(`state.json already matches desired state — skipping write`)
     }
 
-    const listOut = await ghApi(
-      ['api', '--paginate', '--slurp', `repos/${repo}/hooks`],
-      null,
-    )
+    log(`Listing existing webhooks on ${repo}...`)
+    let listOut: string
+    try {
+      listOut = await ghApi(
+        ['api', '--paginate', '--slurp', `repos/${repo}/hooks`],
+        null,
+      )
+    } catch (err) {
+      if (err instanceof GhError) {
+        if (err.is404) {
+          throw new Error(`Could not find repo '${repo}'. Check the spelling, or verify you have access (gh returned 404).`)
+        }
+        if (err.is403) {
+          throw new Error(`Access denied to '${repo}' webhooks. Your gh token likely needs the 'admin:repo_hook' scope. Run \`gh auth refresh -s admin:repo_hook\` and retry.`)
+        }
+        if (err.isAuth) {
+          throw new Error(`gh is not authenticated. Run \`gh auth login\` and retry.`)
+        }
+      }
+      throw err
+    }
     const pages = JSON.parse(listOut)
     const hooks = Array.isArray(pages) ? pages.flat() : []
     // biome-ignore lint/suspicious/noExplicitAny: webhook payload is untyped JSON
@@ -92,15 +154,19 @@ export async function setup(argv: string[]): Promise<void> {
       active: true,
     })
     if (existingHook) {
+      log(`Updating existing webhook (id ${existingHook.id}) on ${repo}...`)
       await ghApi(
         ['api', '--method', 'PATCH', `repos/${repo}/hooks/${existingHook.id}`, '--input', '-'],
         payload,
       )
+      log(`Updated webhook ${existingHook.id}`)
     } else {
+      log(`Creating new webhook on ${repo}...`)
       await ghApi(
         ['api', '--method', 'POST', `repos/${repo}/hooks`, '--input', '-'],
         payload,
       )
+      log('Created webhook')
     }
 
     // .mcp.json: KEY-PRESENCE check, not truthiness. If `ci: null` or
@@ -113,10 +179,13 @@ export async function setup(argv: string[]): Promise<void> {
     if (!('ci' in servers)) {
       mcp.mcpServers = { ...servers, ci: CI_MCP_ENTRY }
       writeFileSync(mcpPath, JSON.stringify(mcp, null, 2) + '\n')
+      log(`Registered 'ci' in ${mcpPath}`)
+    } else {
+      log(`'ci' already registered in ${mcpPath} — skipping (user customizations preserved)`)
     }
 
     console.log(
-      'Done. Launch Claude Code with `claude --dangerously-load-development-channels server:ci`.',
+      '\nDone. Launch Claude Code with `claude --dangerously-load-development-channels server:ci`.',
     )
   } catch (err) {
     console.error(`[ci-channel] setup failed: ${(err as Error).message}`)
