@@ -108,6 +108,33 @@ Contributors to the bloat:
 
 The iter5 structural fix — removing the skip path and always PATCH-ing — proved the optimization was never worth the correctness cost. **Rule of thumb: if a code area keeps producing edge cases across review iterations, simplify the abstraction rather than patching the edge cases.** *(Spec 3, iter5)*
 
+### Tight specs pay for themselves — Spec 3 → Spec 5 rebuild
+Spec 5 was a rebuild of the same feature (`ci-channel setup`) under a spec that enumerated **hard caps** instead of "guidelines": single-file implementation ≤150 lines, single-file tests ≤200 lines, ≤8 tests, no DI, no new dependencies, no interactive prompts, no helper modules, no multi-shape defensive parsing, no "skip if already correct" fast path. The final implementation came in at 120 lines (20% under cap) and shipped in **2 iterations** (spec-consult → impl-consult → tests-consult, all REQUEST_CHANGES items were gap-fills not rework).
+
+Things the tight spec prevented by construction:
+- **The deepEqual helper** — Claude's iter1 plan review said "sketch shows `deepEqual(existing, desired)` while prose says 'direct compare'"; the fix was to inline the three-condition boolean in the sketch. Without the ≤150-line cap, a helper would have been the "cleaner" choice and eaten budget.
+- **The `ci` truthiness check** — Codex's iter1 impl review caught `if (!mcp.mcpServers?.ci)` as too-truthy (`ci: null` is a valid user customization). The fix was `if (!('ci' in servers))`. Without an explicit "key presence, not truthiness" rule in the spec, both checks would have seemed equivalent.
+- **`fetchSmeeChannel` real network in tests** — iter1 reviews all flagged that "mock only `spawn`" was unworkable because `fetchSmeeChannel` uses `fetch`. The architect's resolution: drop the `globalThis.fetch` stub and **prepopulate state.json** in every test so the fetch path is never entered. `fetchSmeeChannel` is already covered by `tests/bootstrap.test.ts`.
+
+**The rule**: spec constraints should be written as **maxima, not minima**. "At most N lines / at most M files / at most K tests" is enforceable; "keep it simple" is not. Plan and review gates must mechanically check the caps (`wc -l`, `grep -c`, `ls`). Violations are automatic REQUEST_CHANGES, not style suggestions. *(Spec 5)*
+
+### Never override `process.stdout.write` during node:test execution
+When writing tests that need to capture setup-under-test output AND call `process.exit` from inside the setup, it's tempting to override `process.stdout.write` alongside `process.stderr.write` and `process.exit`. **Don't**. node:test emits its own TAP events (`ok N - testname`, subtest headers) to `process.stdout` DURING test execution, not just at test boundaries. An override that runs across an `await` will swallow those emissions into the test's local buffer, and the results vanish from the reporter.
+
+Symptom: node:test reports `1..8` in its plan line but only shows the subset of tests whose `process.stdout.write` override was NOT active when their result line was emitted. Tests that override stdout appear to not exist. No error is raised — the tests simply don't show up.
+
+Fix: capture `process.stderr.write` and `process.exit` but leave `process.stdout.write` alone. Setup code's success message ("Done. Launch Claude Code...") will leak into the test runner's output, but this is cosmetic — node:test still sees all the structured result events correctly. *(Spec 5, tests iter1)*
+
+### Natural-seam phase split for constrained single-PR specs
+Porch's state machine requires a minimum of two machine-tracked phases. A spec that says "one commit, one PR, not phased" is forbidding artificial slicing of a single implementation into 4 mini-phases of 37 lines each — it is NOT requiring literal single-git-commit delivery. The **single natural seam** for any implementation that ships with tests is: Phase 1 = implementation, Phase 2 = tests. Each is a single file, a single atomic unit of work, and a single commit. Both commits land in one PR. Squash-merge at merge time if the reviewer prefers a single final commit.
+
+Avoid inventing additional seams (e.g., "Phase 1 = parseArgs, Phase 2 = fs operations, Phase 3 = gh calls, Phase 4 = mcp merge") — this is exactly what the "not phased" rule forbids. Stick to impl-vs-tests. *(Spec 5, plan iter1)*
+
+### Always assert `exitCode === null` on success paths when `process.exit` is intercepted
+When a test helper intercepts `process.exit(1)` by throwing a sentinel and catching it, the test code CAN keep running after a "successful" setup call that actually failed through the failure path — as long as whatever assertions come next happen to also pass on the partial state. Unless every success-path test explicitly asserts `res.exitCode === null`, a silent failure-path exit can slip through.
+
+Example: Scenario 2 of the Spec 5 installer tests is "idempotent re-run: PATCH exactly once." Without the exit assertion, a test where `setup()` hits the list call, then fails in .mcp.json merge, then exits 1 would still satisfy the `PATCH called` assertion (because the PATCH happened before the exit) and would look like a pass. The fix is trivial — one line per test — but the cost of omitting it is non-obvious. *(Spec 5, tests iter1, caught by Codex)*
+
 ---
 
 *Generated by MAINTAIN protocol from review documents.*
