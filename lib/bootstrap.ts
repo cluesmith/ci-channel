@@ -72,22 +72,18 @@ export async function bootstrap(
     }
   }
 
-  // Step 5: Push setup notification if anything was auto-provisioned
+  // Step 5: Push ready notification on every startup
   const wasProvisioned = secretGenerated || smeeProvisioned
-  if (wasProvisioned) {
-    const lines = ['CI channel ready. Configure your forge webhook:']
-    if (smeeUrl) lines.push(`  URL: ${smeeUrl}`)
-    lines.push(`  Secret: ${secret}`)
-    lines.push('  Events: Workflow runs (GitHub/Gitea) or Pipeline events (GitLab)')
-
-    const content = lines.join('\n')
-    try {
-      await deps.pushNotification(content, { setup: 'true' })
-    } catch {
-      // Notification push failed — stderr backup is sufficient
-    }
-    console.error(`[ci-channel] ${content}`)
+  const repoInfo = config.repos?.length
+    ? ` Monitoring: ${config.repos.join(', ')}.`
+    : ' Monitoring: all repos (no filter).'
+  const content = `CI channel ready (${config.forge}).${repoInfo}`
+  try {
+    await deps.pushNotification(content, { setup: 'true' })
+  } catch {
+    // Notification push failed — stderr backup is sufficient
   }
+  console.error(`[ci-channel] ${content}`)
 
   return { webhookSecret: secret, smeeUrl, wasProvisioned }
 }

@@ -97,12 +97,11 @@ describe('bootstrap', () => {
 
     assert.strictEqual(deps.notifications.length, 1)
     assert.ok(deps.notifications[0].content.includes('CI channel ready'))
-    assert.ok(deps.notifications[0].content.includes('https://smee.io/test-channel'))
-    assert.ok(deps.notifications[0].content.includes('generated-secret-abc123'))
+    assert.ok(deps.notifications[0].content.includes('all repos (no filter)'))
     assert.deepStrictEqual(deps.notifications[0].meta, { setup: 'true' })
   })
 
-  test('does not push notification when nothing provisioned', async () => {
+  test('pushes ready notification even when nothing provisioned', async () => {
     const deps = makeDeps()
     await bootstrap(
       makeConfig({ webhookSecret: 'existing', smeeUrl: 'https://smee.io/existing' }),
@@ -110,7 +109,8 @@ describe('bootstrap', () => {
       deps,
     )
 
-    assert.strictEqual(deps.notifications.length, 0)
+    assert.strictEqual(deps.notifications.length, 1)
+    assert.ok(deps.notifications[0].content.includes('CI channel ready'))
   })
 
   test('handles smee provisioning failure gracefully', async () => {
