@@ -399,6 +399,66 @@ describe('ci-channel setup', () => {
     })
   })
 
+  // ========== Issue #11: smee URL drift → PATCH instead of duplicate POST ==========
+
+  test('19. GitHub smee URL drift: PATCHes existing webhook instead of creating duplicate', { skip: WIN }, async () => {
+    const OLD_SMEE = 'https://smee.io/old-channel-xyz'
+    await inProject(async ({ root, bin }) => {
+      seedState(root, { webhookSecret: SECRET, smeeUrl: URL_ })
+      writeFileSync(join(root, '.mcp.json'), MCP_CI_ONLY)
+      // Existing webhook points to a DIFFERENT smee URL than state.json
+      mkFakeCli(bin, 'gh', [
+        { stdout: JSON.stringify([[{ id: 55, config: { url: OLD_SMEE } }]]) },
+        { stdout: '{}' },
+      ])
+      const res = await runSetup(['--repo', 'foo/bar'])
+      assert.equal(res.exitCode, null, `unexpected exit: ${res.stderr}`)
+      // Should PATCH the existing hook, not POST a new one
+      assert.match(cliArgs(bin, 'gh', 2), /--method PATCH repos\/foo\/bar\/hooks\/55 --input -/)
+      assert.equal(cliCount(bin, 'gh'), 2, 'exactly 2 gh calls (list + patch)')
+      const payload = JSON.parse(cliStdin(bin, 'gh', 2))
+      assert.equal(payload.config.url, URL_, 'PATCH payload uses current smee URL from state')
+    })
+  })
+
+  test('20. GitLab smee URL drift: PUTs existing hook instead of creating duplicate', { skip: WIN }, async () => {
+    const OLD_SMEE = 'https://smee.io/old-channel-xyz'
+    await inProject(async ({ root, bin }) => {
+      seedState(root, { webhookSecret: SECRET, smeeUrl: URL_ })
+      writeFileSync(join(root, '.mcp.json'), MCP_CI_ONLY)
+      mkFakeCli(bin, 'glab', [
+        { stdout: JSON.stringify([{ id: 88, url: OLD_SMEE }]) },
+        { stdout: '{}' },
+      ])
+      const res = await runSetup(['--repo', 'group/project', '--forge', 'gitlab'])
+      assert.equal(res.exitCode, null, `unexpected exit: ${res.stderr}`)
+      assert.match(cliArgs(bin, 'glab', 2), /--method PUT projects\/group%2Fproject\/hooks\/88 --input -/)
+      assert.equal(cliCount(bin, 'glab'), 2, 'exactly 2 glab calls (list + put)')
+    })
+  })
+
+  test('21. Gitea smee URL drift: PATCHes existing hook instead of creating duplicate', { skip: WIN }, async () => {
+    const OLD_SMEE = 'https://smee.io/old-channel-xyz'
+    await inProject(async ({ root }) => {
+      seedState(root, { webhookSecret: SECRET, smeeUrl: URL_ })
+      writeFileSync(join(root, '.mcp.json'), MCP_CI_ONLY)
+      writeEnv(root, 'GITEA_TOKEN=fake-token\n')
+      await withGiteaServer((req, res) => {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(req.method === 'GET' ? JSON.stringify([{ id: 101, config: { url: OLD_SMEE } }]) : '{}')
+      }, async (serverUrl, reqs) => {
+        const res = await runSetup(['--repo', 'owner/repo', '--forge', 'gitea', '--gitea-url', serverUrl])
+        assert.equal(res.exitCode, null, `unexpected exit: ${res.stderr}`)
+        const patchReq = reqs.find((r) => r.method === 'PATCH')
+        assert.ok(patchReq, 'expected a PATCH request')
+        assert.equal(patchReq!.url, '/api/v1/repos/owner/repo/hooks/101')
+        const body = JSON.parse(patchReq!.body)
+        assert.equal(body.config.url, URL_, 'PATCH payload uses current smee URL from state')
+        assert.equal(reqs.filter((r) => r.method === 'POST').length, 0, 'no POST (no duplicate webhook)')
+      })
+    })
+  })
+
   // ========== ci-channel remove (Spec 8, simplified in v0.5.1) ==========
   // remove is local-only: deletes state.json, strips .mcp.json ci entry,
   // reverts Codev flag. It does NOT call any forge API — the webhook on the
