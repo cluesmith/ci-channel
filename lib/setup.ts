@@ -175,6 +175,9 @@ export async function setup(argv: string[]): Promise<void> {
         const hooks = Array.isArray(pages) ? pages.flat() : []
         // biome-ignore lint/suspicious/noExplicitAny: untyped webhook JSON
         const existingHook = hooks.find((h: any) => h?.config?.url === smeeUrl)
+          // Fallback: match any smee.io webhook (handles smee URL drift — issue #11)
+          // biome-ignore lint/suspicious/noExplicitAny: untyped webhook JSON
+          ?? hooks.find((h: any) => typeof h?.config?.url === 'string' && h.config.url.startsWith('https://smee.io/'))
         if (existingHook) {
           log(`Updating existing webhook (id ${existingHook.id}) on ${repo}...`)
           await cliApi('gh', ['api', '--method', 'PATCH', `repos/${repo}/hooks/${existingHook.id}`, '--input', '-'], payload)
@@ -204,7 +207,10 @@ export async function setup(argv: string[]): Promise<void> {
         const listOut = await cliApi('glab', ['api', `projects/${encoded}/hooks`], null)
         const hooks = JSON.parse(listOut)
         // biome-ignore lint/suspicious/noExplicitAny: untyped hook JSON
-        const existingHook = Array.isArray(hooks) ? hooks.find((h: any) => h?.url === smeeUrl) : null
+        const existingHook = Array.isArray(hooks) ? (hooks.find((h: any) => h?.url === smeeUrl)
+          // Fallback: match any smee.io hook (handles smee URL drift — issue #11)
+          // biome-ignore lint/suspicious/noExplicitAny: untyped hook JSON
+          ?? hooks.find((h: any) => typeof h?.url === 'string' && h.url.startsWith('https://smee.io/'))) : null
         if (existingHook) {
           log(`Updating existing hook (id ${existingHook.id}) on ${repo}...`)
           await cliApi('glab', ['api', '--method', 'PUT', `projects/${encoded}/hooks/${existingHook.id}`, '--input', '-'], payload)
@@ -228,7 +234,10 @@ export async function setup(argv: string[]): Promise<void> {
       // biome-ignore lint/suspicious/noExplicitAny: untyped JSON
       const hooks = (await listResp.json()) as any[]
       // biome-ignore lint/suspicious/noExplicitAny: untyped JSON
-      const existingHook = Array.isArray(hooks) ? hooks.find((h: any) => h?.config?.url === smeeUrl) : null
+      const existingHook = Array.isArray(hooks) ? (hooks.find((h: any) => h?.config?.url === smeeUrl)
+        // Fallback: match any smee.io hook (handles smee URL drift — issue #11)
+        // biome-ignore lint/suspicious/noExplicitAny: untyped JSON
+        ?? hooks.find((h: any) => typeof h?.config?.url === 'string' && h.config.url.startsWith('https://smee.io/'))) : null
       const cfg = { url: smeeUrl, content_type: 'json', secret }
       if (existingHook) {
         log(`Updating existing hook (id ${existingHook.id}) on ${repo}...`)
