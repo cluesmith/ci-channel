@@ -350,7 +350,7 @@ Forges occasionally retry webhook delivery. The plugin tracks the last 100 deliv
 The channel is built for CI **failure** alerts, so by default it forwards only failure-like outcomes and silently drops everything else:
 
 - **Forwarded by default**: `failure`, `cancelled`, `timed_out`, `action_required`, plus any outcome the filter doesn't recognize (so new forge outcomes aren't lost).
-- **Dropped by default**: `success`, `skipped`, `neutral`, `manual`, `stale`, plus in-progress / non-terminal states like `requested`, `in_progress`, `completed`, `running`, `pending`, `queued`, `waiting`, `preparing`.
+- **Dropped by default**: `success`, `skipped`, `neutral`, `manual`, `stale`, plus in-progress / non-terminal states — `requested`, `in_progress`, `completed`, `running`, `pending`, `queued`, `waiting`, `preparing`, `created`, `waiting_for_resource`, `scheduled` (the last three are GitLab-specific).
 
 Override with `--conclusions`:
 

@@ -1,0 +1,41 @@
+Let me read the key production files and verify the implementation against the spec.Now let me verify the tests pass and check the version consistency:All 237 tests pass (2 pre-existing skipped), versions are consistent. Let me do a quick check on the review document and commit history:This is a clean, well-executed PR. Let me give my verdict.
+
+---
+
+**Code Quality & Correctness**: The implementation is tight. `normalizeConclusion` and `isConclusionAllowed` are pure functions with clean three-mode semantics. The `Set` for the exclusion list is the right data structure. Config parsing follows the existing `workflowFilter` pattern exactly — no surprises for maintainers. The handler insertion point is correct (step 6, between workflow filter and notification).
+
+**Spec Alignment**: All success criteria from the spec are met. The exclusion-list default, the `all` sentinel, the mixed-`all` rejection, cross-forge normalization, startup banner — all present and correct.
+
+**Test Coverage**: 36 new tests across unit (`normalizeConclusion`, `isConclusionAllowed`), config integration (precedence, normalization, `all` validation), handler integration (GitHub + GitLab cross-forge), and bootstrap banner. All 12 spec test scenarios are mapped. The `envKeys` array includes `CONCLUSIONS` (preventing env leakage). The existing test fixtures were updated mechanically and correctly — `['all']` for tests that assert pre-filter behavior, `null` for everything else.
+
+**Edge Cases**: Empty strings, `'unknown'`, novel strings (`'xyz'`), cross-forge spelling (`failed`→`failure`, `canceled`→`cancelled`), case-insensitivity, mixed `all` rejection — all covered in tests.
+
+**Documentation**: README section is thorough with examples, upgrade note, and the config table entry. INSTALL.md, CLAUDE.md, AGENTS.md, arch.md, and lessons-learned all updated. Review document is comprehensive.
+
+**One minor observation** (non-blocking): The `completed` value is in the exclusion set, which makes sense since GitHub can emit `completed` as an action on `workflow_run` events before the conclusion is set. But if a forge ever uses `completed` as a terminal conclusion synonym, it would be silently dropped under the default. The fail-open design for unknown strings doesn't help here since `completed` is *known*. This is acceptable — the `--conclusions` flag gives users an escape hatch, and the risk is low.
+
+---
+VERDICT: APPROVE
+SUMMARY: Clean, spec-compliant implementation with thorough test coverage (237/237 pass), correct three-mode filter semantics, and comprehensive documentation updates.
+CONFIDENCE: HIGH
+---
+
+KEY_ISSUES:
+- None
+
+PR_SUMMARY: |
+  ## Summary
+  Adds a `--conclusions` CLI flag (and `CONCLUSIONS` env var) that filters CI notifications by run outcome. By default, only failure-like outcomes are forwarded — aligning the implementation with the channel's stated purpose as a CI failure alerting tool. Ships as v0.6.0.
+
+  ## Key Changes
+  - `lib/webhook.ts` — `normalizeConclusion` + `isConclusionAllowed` pure helpers (exclusion-based default, `['all']` sentinel, explicit inclusion list)
+  - `lib/config.ts` — `conclusions` config field with normalization at load time and mixed-`all` rejection
+  - `lib/handler.ts` — new filter step 6 between workflow filter and notification
+  - `lib/bootstrap.ts` — startup banner includes active filter description
+  - README, INSTALL, CLAUDE, AGENTS docs updated; version bump to 0.6.0
+  - 36 new tests (237 total, 0 failures)
+
+  ## Test Plan
+  - `npm test` — 237 passed, 0 failed, 2 pre-existing skipped
+  - `npm run build` — TypeScript compilation clean
+  - Manual smoke: `--conclusions failure,all` errors correctly; `--conclusions failure` loads cleanly

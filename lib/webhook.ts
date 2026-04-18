@@ -82,6 +82,10 @@ const DEFAULT_EXCLUDED_CONCLUSIONS = new Set([
   "queued",
   "waiting",
   "preparing",
+  // GitLab-specific non-terminal states (see GitLab pipeline status docs)
+  "created",
+  "waiting_for_resource",
+  "scheduled",
 ]);
 
 export function normalizeConclusion(s: string): string {

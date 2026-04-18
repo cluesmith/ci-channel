@@ -152,7 +152,7 @@ Exports:
 - `isDuplicate()` — Bounded dedup set (100 entries, FIFO eviction)
 - `isRepoAllowed()` / `isWorkflowAllowed()` — Allowlist/filter checks
 - `normalizeConclusion()` — Pure lowercase + spelling canonicalization (`failed`→`failure`, `canceled`→`cancelled`). Used by both config-load and the runtime filter.
-- `isConclusionAllowed()` (Spec 13) — Three-mode filter: `null` allowlist uses a hardcoded exclusion set of known non-failure and in-progress outcomes (`success`, `skipped`, `neutral`, `manual`, `stale`, `requested`, `in_progress`, `completed`, `running`, `pending`, `queued`, `waiting`, `preparing`) and forwards everything else (including unknown strings — fail-open for novel forge outcomes). `['all']` sentinel bypasses the filter entirely. Any other list is treated as an inclusion list with normalization applied to the event side only (the allowlist is pre-normalized at config-load).
+- `isConclusionAllowed()` (Spec 13) — Three-mode filter: `null` allowlist uses a hardcoded exclusion set of known non-failure and in-progress outcomes (`success`, `skipped`, `neutral`, `manual`, `stale`, `requested`, `in_progress`, `completed`, `running`, `pending`, `queued`, `waiting`, `preparing`, plus GitLab-specific `created`, `waiting_for_resource`, `scheduled`) and forwards everything else (including unknown strings — fail-open for novel forge outcomes). `['all']` sentinel bypasses the filter entirely. Any other list is treated as an inclusion list with normalization applied to the event side only (the allowlist is pre-normalized at config-load).
 
 ### Notification (`lib/notify.ts`)
 

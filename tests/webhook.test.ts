@@ -316,6 +316,13 @@ describe('isConclusionAllowed — default filter (allowlist === null)', () => {
     }
   })
 
+  test('drops GitLab-specific non-terminal states', () => {
+    // GitLab emits these for pipelines that haven't reached a terminal outcome.
+    for (const c of ['created', 'waiting_for_resource', 'scheduled']) {
+      assert.strictEqual(isConclusionAllowed(c, null), false, `expected ${c} dropped`)
+    }
+  })
+
   test('forwards failure, cancelled, timed_out', () => {
     assert.strictEqual(isConclusionAllowed('failure', null), true)
     assert.strictEqual(isConclusionAllowed('cancelled', null), true)
