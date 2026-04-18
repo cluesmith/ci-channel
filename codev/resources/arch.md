@@ -137,9 +137,10 @@ Pipeline steps:
 3. Check deduplication by delivery ID → 200 if duplicate
 4. Check repo allowlist → 200 drop if not listed
 5. Check workflow filter → 200 drop if not matching
-6. Format and push notification → immediately
-7. Fire-and-forget: async job enrichment via `forge.fetchFailedJobs()`
-8. Return 200
+6. Check conclusion filter (Spec 13) → 200 drop if not matching
+7. Format and push notification → immediately
+8. Fire-and-forget: async job enrichment via `forge.fetchFailedJobs()`
+9. Return 200
 
 ### Webhook Types (`lib/webhook.ts`)
 
@@ -150,6 +151,8 @@ Exports:
 - `ParseResult` discriminated union — `event | irrelevant | malformed`
 - `isDuplicate()` — Bounded dedup set (100 entries, FIFO eviction)
 - `isRepoAllowed()` / `isWorkflowAllowed()` — Allowlist/filter checks
+- `normalizeConclusion()` — Pure lowercase + spelling canonicalization (`failed`→`failure`, `canceled`→`cancelled`). Used by both config-load and the runtime filter.
+- `isConclusionAllowed()` (Spec 13) — Three-mode filter: `null` allowlist uses a hardcoded exclusion set of known non-failure and in-progress outcomes (`success`, `skipped`, `neutral`, `manual`, `stale`, `requested`, `in_progress`, `completed`, `running`, `pending`, `queued`, `waiting`, `preparing`) and forwards everything else (including unknown strings — fail-open for novel forge outcomes). `['all']` sentinel bypasses the filter entirely. Any other list is treated as an inclusion list with normalization applied to the event side only (the allowlist is pre-normalized at config-load).
 
 ### Notification (`lib/notify.ts`)
 
@@ -220,9 +223,10 @@ Forge (GitHub/GitLab/Gitea)
 │ 3. Check dedup (delivery ID)         │
 │ 4. Check repo allowlist              │
 │ 5. Check workflow filter             │
-│ 6. Format notification               │
-│ 7. Push to MCP channel               │
-│ 8. Async: forge.fetchFailedJobs()    │
+│ 6. Check conclusion filter           │
+│ 7. Format notification               │
+│ 8. Push to MCP channel               │
+│ 9. Async: forge.fetchFailedJobs()    │
 └──────────────────────────────────────┘
         │
         ▼
