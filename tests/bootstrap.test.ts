@@ -15,6 +15,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     reconcileBranches: ['ci', 'develop'],
     giteaUrl: null,
     giteaToken: null,
+    conclusions: null,
     ...overrides,
   }
 }

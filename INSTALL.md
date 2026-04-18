@@ -171,6 +171,15 @@ For the webhook (step 4), configure in Gitea UI:
 - **Secret**: webhook secret from step 3
 - **Events**: Workflow runs
 
+## Optional flags
+
+All forges accept these additional CLI args in the `.mcp.json` `args` array:
+
+- `--repos OWNER/REPO[,OWNER/REPO2,...]` — restrict notifications to these repos
+- `--workflow-filter NAME[,NAME2,...]` — restrict to specific workflow names
+- `--conclusions VALUE[,VALUE2,...]` — restrict by outcome. Default is failures only (drops `success`, `skipped`, `neutral`, `manual`, `stale`, and in-progress states). Pass `--conclusions all` to disable. See the README "Filtering by conclusion" section for the full list of recognized values. **Upgrading from pre-0.6.0 and want every notification back? Use `--conclusions all`.**
+- `--reconcile-branches BRANCH[,BRANCH2,...]` — branches to check on startup (default `ci,develop`)
+
 ## Verification
 
 After setup, verify the channel is working:

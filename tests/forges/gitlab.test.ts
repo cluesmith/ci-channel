@@ -14,6 +14,7 @@ const dummyConfig: Config = {
   reconcileBranches: ['main'],
   giteaUrl: null,
   giteaToken: null,
+  conclusions: null,
 }
 
 const SECRET = 'gitlab-test-token'

@@ -55,6 +55,7 @@ const dummyConfig: Config = {
   reconcileBranches: ['develop'],
   giteaUrl: null,
   giteaToken: null,
+  conclusions: null,
 }
 
 describe('giteaForge.validateSignature', () => {

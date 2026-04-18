@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { loadState } from './state.js'
 import { findProjectRoot } from './project-root.js'
+import { normalizeConclusion } from './webhook.js'
 
 export const VALID_FORGES = ['github', 'gitlab', 'gitea'] as const
 export type ForgeName = (typeof VALID_FORGES)[number]
@@ -17,6 +18,7 @@ export interface Config {
   reconcileBranches: string[]
   giteaUrl: string | null
   giteaToken: string | null
+  conclusions: string[] | null
 }
 
 function parseEnvFile(path: string): Record<string, string> {
@@ -87,7 +89,7 @@ function parseCliArgs(argv: string[]): Record<string, string> {
   const args: Record<string, string> = {}
   const knownFlags = new Set([
     '--forge', '--repos', '--port', '--workflow-filter',
-    '--reconcile-branches', '--gitea-url', '--smee-url',
+    '--reconcile-branches', '--gitea-url', '--smee-url', '--conclusions',
   ])
 
   let i = 0
@@ -159,6 +161,20 @@ export function loadConfig(envFilePath?: string, argv?: string[], statePath?: st
     ? reconcileBranchesStr.split(',').map(s => s.trim()).filter(Boolean)
     : ['ci', 'develop']
 
+  // Conclusions filter — CLI > env > .env. No state.json fallback (user intent only).
+  // Each entry is normalized at load time (lowercase + spelling canonicalization);
+  // the runtime filter (isConclusionAllowed) only normalizes the event side.
+  const conclusionsRaw = splitCommaList(get('CONCLUSIONS', '--conclusions'))
+  let conclusions: string[] | null = null
+  if (conclusionsRaw !== null) {
+    conclusions = conclusionsRaw.map(normalizeConclusion)
+    if (conclusions.length > 1 && conclusions.includes('all')) {
+      throw new Error(
+        'Invalid --conclusions value: "all" may only appear as a standalone sentinel.'
+      )
+    }
+  }
+
   return {
     forge,
     webhookSecret,
@@ -169,5 +185,6 @@ export function loadConfig(envFilePath?: string, argv?: string[], statePath?: st
     reconcileBranches,
     giteaUrl: get('GITEA_URL', '--gitea-url') ?? null,
     giteaToken: get('GITEA_TOKEN') ?? null,
+    conclusions,
   }
 }

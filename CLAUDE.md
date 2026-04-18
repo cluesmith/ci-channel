@@ -32,7 +32,7 @@ See `codev/resources/arch.md` for the full architecture document.
 
 **State is project-scoped** as of v0.2.0. Each project gets its own `<project-root>/.claude/channels/ci/state.json` and `<project-root>/.claude/channels/ci/.env`. Project root is detected via `findProjectRoot()` (walks up for `.mcp.json` or `.git/`).
 
-- **Structural config**: CLI args in `.mcp.json` — `--forge`, `--repos`, `--workflow-filter`, `--reconcile-branches`, `--port`, `--gitea-url`, `--smee-url`
+- **Structural config**: CLI args in `.mcp.json` — `--forge`, `--repos`, `--workflow-filter`, `--conclusions`, `--reconcile-branches`, `--port`, `--gitea-url`, `--smee-url`
 - **Secrets**: `<project-root>/.claude/channels/ci/.env` — `WEBHOOK_SECRET`, `GITEA_TOKEN`
 - **Auto-provisioned state**: `<project-root>/.claude/channels/ci/state.json` — generated secret + smee URL
 - **Precedence**: CLI args > env vars > `.env` file > `state.json`

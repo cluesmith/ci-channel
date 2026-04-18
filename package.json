@@ -1,6 +1,6 @@
 {
   "name": "ci-channel",
-  "version": "0.5.5",
+  "version": "0.6.0",
   "description": "Claude Code channel plugin for real-time CI/CD failure notifications (GitHub Actions, GitLab CI, Gitea Actions)",
   "type": "module",
   "main": "dist/server.js",

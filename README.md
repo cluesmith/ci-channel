@@ -276,6 +276,7 @@ Precedence: CLI args > env vars > `.env` file > `state.json`.
 | `--forge` | `github` | Forge type: `github`, `gitlab`, or `gitea` |
 | `--repos` | — | Comma-separated repo/project allowlist |
 | `--workflow-filter` | — | Comma-separated workflow names to monitor |
+| `--conclusions` | _(failures only)_ | Comma-separated outcomes to forward; or `all` to disable filtering. See [Filtering by conclusion](#filtering-by-conclusion). |
 | `--reconcile-branches` | `ci,develop` | Branches to check for recent failures on startup |
 | `--port` | `0` (random) | HTTP server port (0 = OS-assigned) |
 | `--gitea-url` | — | Gitea instance base URL (required for Gitea reconciliation) |
@@ -300,6 +301,7 @@ All CLI args also accept env vars for backward compatibility:
 | `PORT` | `--port` | CLI arg takes precedence |
 | `SMEE_URL` | `--smee-url` | CLI arg takes precedence |
 | `WORKFLOW_FILTER` | `--workflow-filter` | CLI arg takes precedence |
+| `CONCLUSIONS` | `--conclusions` | CLI arg takes precedence |
 | `RECONCILE_BRANCHES` | `--reconcile-branches` | CLI arg takes precedence |
 | `GITEA_URL` | `--gitea-url` | CLI arg takes precedence |
 
@@ -341,6 +343,34 @@ Forges occasionally retry webhook delivery. The plugin tracks the last 100 deliv
 
 - **Repository allowlist** (`--repos`): Only receive notifications from repos you care about
 - **Workflow filter** (`--workflow-filter`): Only monitor specific workflows
+- **Conclusion filter** (`--conclusions`): Only forward specific run outcomes (see below)
+
+### Filtering by conclusion
+
+The channel is built for CI **failure** alerts, so by default it forwards only failure-like outcomes and silently drops everything else:
+
+- **Forwarded by default**: `failure`, `cancelled`, `timed_out`, `action_required`, plus any outcome the filter doesn't recognize (so new forge outcomes aren't lost).
+- **Dropped by default**: `success`, `skipped`, `neutral`, `manual`, `stale`, plus in-progress / non-terminal states like `requested`, `in_progress`, `completed`, `running`, `pending`, `queued`, `waiting`, `preparing`.
+
+Override with `--conclusions`:
+
+```bash
+# Restore the pre-0.6.0 behavior (forward every event)
+--conclusions all
+
+# Forward failures AND successes (e.g. to track deploys)
+--conclusions failure,success
+
+# Strict failures-only, no cancellations
+--conclusions failure
+```
+
+Notes:
+- Values are case-insensitive. American and British spellings are equivalent (`failed` ≡ `failure`, `canceled` ≡ `cancelled`).
+- `all` is a standalone sentinel — mixed lists like `failure,all` are rejected at startup.
+- When you provide an explicit list, the filter is inclusion-based: only listed values pass, and unknown strings are dropped.
+
+**Upgrade note (v0.6.0+)**: Successful runs are no longer forwarded by default. Pass `--conclusions all` to restore the prior behavior.
 
 ## Security
 

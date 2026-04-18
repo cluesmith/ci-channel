@@ -40,6 +40,10 @@ const testConfig: Config = {
   reconcileBranches: ['ci', 'develop'],
   giteaUrl: null,
   giteaToken: null,
+  // Use 'all' sentinel so existing tests (including "success event → notification")
+  // keep pre-filter coverage. The default-filter behavior is covered by new tests
+  // in Phase 2.
+  conclusions: ['all'],
 }
 
 function readBody(req: IncomingMessage): Promise<string> {

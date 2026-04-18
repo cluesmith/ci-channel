@@ -34,6 +34,8 @@ const testConfig: Config = {
   reconcileBranches: ['main'],
   giteaUrl: null,
   giteaToken: null,
+  // 'all' preserves pre-filter coverage including the "running pipeline state" test.
+  conclusions: ['all'],
 }
 
 function readBody(req: IncomingMessage): Promise<string> {

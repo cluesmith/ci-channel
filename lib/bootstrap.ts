@@ -16,6 +16,12 @@ export interface BootstrapDeps {
   pushNotification(content: string, meta: Record<string, string>): Promise<void>
 }
 
+export function formatConclusionsSummary(conclusions: string[] | null): string {
+  if (conclusions === null) return 'default (failures)'
+  if (conclusions.length === 1 && conclusions[0] === 'all') return 'all'
+  return conclusions.join(', ')
+}
+
 export function ensureSecretReal(existing: string | null): { secret: string; generated: boolean } {
   if (existing) {
     return { secret: existing, generated: false }
@@ -77,7 +83,8 @@ export async function bootstrap(
   const repoInfo = config.repos?.length
     ? ` Monitoring: ${config.repos.join(', ')}.`
     : ' Monitoring: all repos (no filter).'
-  const content = `CI channel ready (${config.forge}).${repoInfo}`
+  const conclusionsInfo = ` Conclusions: ${formatConclusionsSummary(config.conclusions)}.`
+  const content = `CI channel ready (${config.forge}).${repoInfo}${conclusionsInfo}`
   try {
     await deps.pushNotification(content, { setup: 'true' })
   } catch {
