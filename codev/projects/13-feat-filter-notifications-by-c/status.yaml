@@ -1,0 +1,20 @@
+id: '13'
+title: feat-filter-notifications-by-c
+protocol: aspir
+phase: review
+plan_phases:
+  - id: impl
+    title: 'Implementation: config + webhook helper + handler wiring + startup banner + docs + version bump'
+    status: complete
+  - id: tests
+    title: 'Automated tests: filter helper + handler integration + config-layer integration'
+    status: complete
+current_plan_phase: null
+gates:
+  pr:
+    status: pending
+iteration: 1
+build_complete: false
+history: []
+started_at: '2026-04-18T06:03:47.257Z'
+updated_at: '2026-04-18T06:29:14.198Z'

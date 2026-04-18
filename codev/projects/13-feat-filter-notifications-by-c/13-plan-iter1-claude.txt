@@ -1,0 +1,79 @@
+I'll review the plan by first verifying the actual codebase structure and the files the plan references.Now let me check the test files and other referenced files:Now let me check the handler integration tests to understand the existing test infrastructure:I notice a critical issue I need to verify — the existing integration test for success events:Now let me check the Gitea integration test:I now have a thorough understanding of the codebase. Here's my review.
+
+---
+
+## Plan Review: Filter Notifications by Conclusion
+
+### 1. Spec Coverage
+
+The plan covers all spec requirements comprehensively. The mapping from spec success criteria to implementation steps is explicit, and the test scenarios (Phase 2) map 1:1 to the spec's 12 test scenarios. The reconciliation scoping exclusion is correctly carried forward. No phases exceed spec scope.
+
+### 2. Technical Approach
+
+The approach is architecturally sound. Placing `normalizeConclusion` and `isConclusionAllowed` in `webhook.ts` alongside the existing `isWorkflowAllowed` pattern is the right call — it mirrors a proven pattern the codebase already uses. The insertion point in the handler pipeline (between Step 5 workflow filter and Step 6 notification) is correct and verified against the actual code.
+
+### 3. Critical Issues
+
+#### Issue A: Existing tests WILL break in Phase 1 — plan doesn't account for this
+
+The plan's Phase 1 success criteria says *"Existing test suite passes: `npm test`"* and *"No new tests in Phase 1. Regression-only."* But the behavior change **will break at least two existing integration tests**:
+
+1. **`tests/integration.test.ts` line 169–183** — *"success event → 200 + notification with conclusion field"* — sends a `success` event and asserts a notification is produced. With the default filter active (no `conclusions` in `testConfig`), `success` is excluded. This test will fail.
+
+2. **`tests/integration-gitlab.test.ts` line 176–179** — asserts that a `running` pipeline event produces a notification. `running` is in the default exclusion set. This test will fail.
+
+The plan needs to explicitly instruct the builder to either:
+- Add `conclusions: ['all']` to these test configs (to preserve pre-filter behavior for unrelated tests), or
+- Update the test assertions to match the new default behavior
+
+This is a Phase 1 concern, not Phase 2.
+
+#### Issue B: TypeScript compilation will fail — `Config` interface change not propagated to tests
+
+Adding `conclusions: string[] | null` to the `Config` interface means **every test file that constructs a `Config` object inline** will fail `npm run build` with a missing-property error. Affected files:
+
+| File | Line | Object |
+|------|------|--------|
+| `tests/integration.test.ts` | 33–43 | `testConfig` |
+| `tests/integration-gitlab.test.ts` | 27–37 | `testConfig` |
+| `tests/integration-gitea.test.ts` | 32–42 | `testConfig` |
+| `tests/bootstrap.test.ts` | 7–19 | `makeConfig()` helper |
+
+All need `conclusions: null` added. This **must** happen in Phase 1 to satisfy the *"Type-checks: `npm run build` produces no errors"* success criterion. The plan lists only production files for Phase 1; it should include these test files as mechanical updates.
+
+#### Issue C: `envKeys` in `config.test.ts` needs `CONCLUSIONS`
+
+The test's env save/restore mechanism (line 13–16) enumerates all env vars it touches. `CONCLUSIONS` must be added to this array or Phase 2's config tests will leak env state across test cases.
+
+### 4. Minor Issues
+
+**Phase 2 references `tests/handler.test.ts` — file doesn't exist.** No such file exists in the project. Handler integration tests live in `tests/integration.test.ts`. A builder following the plan literally will create a new file unnecessarily. The plan should reference `tests/integration.test.ts` (and add the new conclusion-filter integration tests there alongside the existing ones).
+
+**Phase 2 T12 is hedged unnecessarily.** The plan says *"If no bootstrap test exists today..."* — but `tests/bootstrap.test.ts` exists with 12 tests, a `makeConfig` helper, and a `makeDeps` mock pattern. The plan should state this definitively and instruct the builder to use the existing pattern. The suggestion to extract `formatConclusionsSummary` is good for testability and should be stated as the approach, not a conditional.
+
+### 5. Risk Assessment
+
+The plan's risk table is solid. The one risk it misses is the one I've identified above: **the Phase 1 regression guard is invalid because the behavior change breaks existing tests that assume "everything passes through."** This is the most common failure mode for this type of feature — the plan author correctly identified it as a behavior change but didn't trace the impact through the existing test suite.
+
+### 6. What the Plan Gets Right
+
+- Two-phase split (impl + tests) is appropriate for this scope
+- The exclusion-based default vs inclusion-based explicit list duality is well-designed
+- Following the `isWorkflowAllowed` pattern reduces cognitive overhead
+- Version bump to `0.6.0` is correct for a behavior change
+- The `normalizeConclusion` approach (single function, called at both config-load and filter time) is clean
+- Calling out that `splitCommaList` strips empty segments is helpful context for the builder
+
+---
+
+**VERDICT: REQUEST_CHANGES**
+**SUMMARY: Plan's Phase 1 will fail its own success criteria — existing tests break due to behavior change and Config interface expansion, and neither is accounted for**
+**CONFIDENCE: HIGH**
+
+---
+
+**KEY_ISSUES:**
+- **(A)** At least 2 existing integration tests will fail under the new default filter (success event test in `integration.test.ts`, running event test in `integration-gitlab.test.ts`). Plan must instruct builder how to handle these in Phase 1.
+- **(B)** Adding `conclusions` to the `Config` interface will cause TypeScript compilation errors in 4 test files that construct `Config` objects inline. These must be updated in Phase 1.
+- **(C)** `CONCLUSIONS` env var must be added to the `envKeys` save/restore array in `config.test.ts` to prevent test pollution (Phase 2 concern, but should be documented in the plan).
+- **(D)** Phase 2 references nonexistent `tests/handler.test.ts` — should reference `tests/integration.test.ts`.

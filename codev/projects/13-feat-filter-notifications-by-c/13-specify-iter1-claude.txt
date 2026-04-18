@@ -1,0 +1,89 @@
+I'll review this spec by first checking the actual codebase files it references to verify its claims and assess feasibility.The working directory is the builder worktree. Let me read the files from the correct paths.Good, I've confirmed the core files. Let me also check the forge parsers and existing test patterns.
+
+Excellent. Now I have a thorough picture of the codebase. Let me deliver the review.
+
+---
+
+## Specification Review: Filter Notifications by Conclusion
+
+### Overall Assessment
+
+This is a well-written, thorough spec. The problem statement is accurate (verified: `handler.ts` has no conclusion filter between step 5 and step 6), the solution approach mirrors existing patterns, and the edge cases are thoughtfully considered. I have a few observations worth addressing.
+
+---
+
+### 1. Completeness ✅
+
+**Strong points:**
+- The pipeline gap is precisely identified — verified in `handler.ts` lines 40-46, there's no filter between the workflow-name check and `formatNotification`.
+- The `WebhookEvent.conclusion` field exists (verified: `webhook.ts` line 6) and all three forges populate it.
+- The `splitCommaList` helper already exists in `config.ts` line 47 — the spec correctly implies reuse.
+- Cross-forge terminology differences are catalogued.
+
+**One gap — reconciliation is not addressed:**
+
+The spec focuses entirely on the webhook handler pipeline, but `lib/reconcile.ts` also generates notifications at startup (for runs that happened while the channel was offline). The filter needs to apply there too, or users will get a burst of success notifications on every restart even with the default filter active. The spec should explicitly state whether reconciliation results are also filtered by conclusion, or note it as out of scope.
+
+### 2. Correctness ✅ (one issue)
+
+**Lowercasing assumption is wrong.** The spec's Assumptions section says:
+
+> Each forge's `parseWebhookEvent` populates `event.conclusion` with a **lowercase** string
+
+This is *mostly* true in practice (GitHub/GitLab/Gitea webhooks use lowercase natively), but the forge parsers do **not** explicitly lowercase the value. GitHub's parser does `run.conclusion ?? payload.action ?? 'unknown'` — it's a raw pass-through. If a forge ever sends a mixed-case value, the filter would silently miss it. The spec's normalization step (lowercase + canonicalize) at the *filter* level would actually catch this, which is good — but the assumption should be corrected to say "values are *expected* to be lowercase but the filter normalizes defensively."
+
+This is minor since the normalization design is already correct, but incorrect assumptions in specs become incorrect assumptions in tests.
+
+### 3. Feasibility ✅
+
+Fully feasible. The implementation mirrors `workflowFilter` exactly:
+- Add `--conclusions` to `knownFlags` in `parseCliArgs` (config.ts line 88)
+- Add `conclusions: string[] | null` to the `Config` interface
+- Parse via `splitCommaList` (already exists)
+- Add an `isConclusionAllowed(conclusion, allowlist)` function in `webhook.ts` (following `isWorkflowAllowed` pattern)
+- Insert one filter step in `handler.ts` between steps 5 and 6
+
+No architectural risk. Complexity is genuinely low.
+
+### 4. Edge Cases & Terminology Canonicalization
+
+**The canonicalization design is solid but needs a spec-level decision on WHERE it happens.** The spec says:
+
+> The filter normalizes both the event's conclusion and each allowlist entry
+
+This means normalization happens at filter-check time (every webhook). An alternative is to normalize the allowlist once at config-load time and normalize the event conclusion once in the filter. The spec should clarify this — it affects whether the builder puts the normalization function in `config.ts` (config-time) or `webhook.ts` (filter-time) or both.
+
+**The `action_required` default exclusion seems wrong.** The spec lists `action_required` as excluded from the default set. But `action_required` is a failure-adjacent state in GitHub Actions — it means a workflow needs manual intervention (e.g., a required approval was denied). A CI monitoring tool arguably *should* surface this by default. Worth a second look.
+
+### 5. Security ✅
+
+No concerns. Pure string comparison, no new trust boundaries, no injection surface.
+
+### 6. Testing Strategy
+
+**Good coverage plan**, but two gaps:
+
+- **No mention of testing the config-layer integration** — i.e., that `--conclusions failure,success` actually produces `config.conclusions = ['failure', 'success']`. The existing pattern for `workflowFilter` presumably has this, but it should be called out.
+- **No mention of testing reconciliation filtering** (ties back to the reconciliation gap above).
+
+The spec correctly notes that the filter should be a pure function — this makes unit testing trivial.
+
+### 7. Minor Observations
+
+- The spec says "mention in startup banner if feasible" for the breaking change. Given that this fundamentally changes what notifications appear, I'd say this is **required**, not "if feasible." The startup banner should say something like `conclusions: failure, cancelled, timed_out (default)` so users know filtering is active.
+- The `all` sentinel value is clean. Good design choice over an empty string or omitting the flag.
+
+---
+
+```
+---
+VERDICT: COMMENT
+SUMMARY: Strong spec with one real gap (reconciliation filtering) and a few minor clarifications needed
+CONFIDENCE: HIGH
+---
+KEY_ISSUES:
+- Reconciliation path (lib/reconcile.ts) also generates notifications but is not addressed — filter may need to apply there too, or the spec should explicitly scope it out
+- Assumption that forge parsers lowercase conclusion values is incorrect (they pass through raw) — the filter design handles this correctly but the assumption text should be fixed
+- Consider whether `action_required` belongs in the default filter set (it's failure-adjacent)
+- Startup banner notification of active filter should be required, not "if feasible"
+```

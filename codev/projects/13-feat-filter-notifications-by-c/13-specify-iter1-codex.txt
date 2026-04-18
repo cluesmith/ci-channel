@@ -1,0 +1,41 @@
+I reviewed the spec against the actual project files, including `lib/config.ts`, `lib/handler.ts`, `lib/webhook.ts`, forge parsers, and reconciliation flow.
+
+The spec is generally feasible and aligns well with the existing architecture: `Config` already has similar list-style fields, `handler.ts` has a clear filter pipeline, and `webhook.ts` is a natural place for a pure allowlist helper similar to `isWorkflowAllowed`.
+
+The main concern is a requirement contradiction around the default behavior for unknown/in-progress conclusions.
+
+The spec says the default should forward only failure-like outcomes: `failure`, `cancelled`, and `timed_out`. But it also says unknown conclusions should be forwarded by default. In the current code, GitHub/Gitea parsers use:
+
+```ts
+conclusion: run.conclusion ?? payload.action ?? 'unknown'
+```
+
+So a non-terminal `workflow_run` with `conclusion: null` may become `requested`, `in_progress`, or similar — not empty/null — and would likely be treated as “unknown.” GitLab also passes `attrs.status` directly, which can include statuses beyond the listed terminal values. If the filter forwards unknowns by default, the implementation may still notify for in-progress/non-failure events, undermining the core “failures only by default” goal.
+
+I’d recommend clarifying one of these options before implementation:
+
+- **Option A:** Default forwards only known failure-like values plus truly empty/null conclusions, but drops known non-failure and known in-progress values.
+- **Option B:** Default forwards all unrecognized strings, accepting that some in-progress events may still notify.
+- **Option C:** Parsers must normalize null/in-progress/non-terminal states explicitly before the conclusion filter runs.
+
+A second smaller ambiguity: `WebhookEvent.conclusion` is currently typed as `string`, but the spec asks to handle `null`. That is fine if the helper accepts `string | null | undefined`, but the spec should state that the event interface remains unchanged and null-safety is handled at the filter boundary/test helper level.
+
+Other minor details worth specifying:
+
+- Whether `all` is case-insensitive.
+- Whether `all` is only valid as a standalone value, e.g. `--conclusions all`, or also inside a list like `failure,all`.
+- Whether unknown configured conclusion values should be accepted silently or rejected.
+- Whether conclusion filtering should also be applied to startup reconciliation. Current reconciliation already only emits failures, so this is probably not necessary, but the spec says “notifications” broadly.
+
+Testing strategy is solid, but I’d add cases for non-terminal values such as GitHub `requested` / `in_progress` and GitLab `running` / `pending`, because those expose the main default-behavior ambiguity.
+
+---
+VERDICT: REQUEST_CHANGES
+SUMMARY: Spec is technically feasible and well-scoped, but the default fail-open handling for unknown conclusions conflicts with the “failures only by default” goal given current parser behavior.
+CONFIDENCE: HIGH
+---
+
+KEY_ISSUES:
+- Default behavior is contradictory: “failures/cancellations/timeouts only” conflicts with “unknown conclusions are forwarded by default,” especially because current parsers may map in-progress/null outcomes to action/status strings like `requested`, `in_progress`, `running`, or `pending`.
+- `WebhookEvent.conclusion` is typed as `string`, but the spec requires null handling; clarify whether null-safety belongs in the helper signature or parser normalization.
+- Semantics for `all`, invalid values, case normalization, and mixed lists like `failure,all` should be made explicit before implementation.
