@@ -48,13 +48,13 @@ This is a **behavior change** — users upgrading stop receiving success notific
 
 #### Objective
 
-Add the conclusions filter end-to-end: config → handler → startup banner → docs. No new tests in this phase; the existing test suite must continue to pass as a regression guard.
+Add the conclusions filter end-to-end: config → handler → startup banner → docs. Phase 1 also carries **mechanical updates to existing tests** — the `Config` interface is expanded, which forces every inline `Config` fixture to add a `conclusions` field, and two existing integration tests explicitly assert pre-filter behavior (success events + running-pipeline events produce notifications) and must opt into `conclusions: ['all']` to keep their coverage intact. No *new* tests in Phase 1 — those are Phase 2.
 
 #### Files modified
 
 1. **`lib/webhook.ts`**
    - Add `normalizeConclusion(s: string): string` — pure function: lowercase, then map `failed`→`failure`, `canceled`→`cancelled`
-   - Add `isConclusionAllowed(conclusion: string, allowlist: string[] | null): boolean` — pure function. When `allowlist` is `null`, returns `false` only if the normalized conclusion is in the hardcoded default **exclusion set**; `true` otherwise. When `allowlist` is `['all']`, returns `true` unconditionally. Otherwise normalizes both sides and returns `allowlist.includes(normalized)`.
+   - Add `isConclusionAllowed(conclusion: string, allowlist: string[] | null): boolean` — pure function. When `allowlist` is `null`, returns `false` only if the normalized conclusion is in the hardcoded default **exclusion set**; `true` otherwise. When `allowlist` is `['all']`, returns `true` unconditionally. Otherwise normalizes **only** the event-side `conclusion` and returns `allowlist.includes(normalizedEventConclusion)` — the allowlist is assumed pre-normalized at config-load time (Gemini's optimization note).
    - Default exclusion set (module-level `const`): `['success', 'skipped', 'neutral', 'manual', 'stale', 'requested', 'in_progress', 'completed', 'running', 'pending', 'queued', 'waiting', 'preparing']`
 
 2. **`lib/config.ts`**
@@ -76,11 +76,11 @@ Add the conclusions filter end-to-end: config → handler → startup banner →
    - Filter is synchronous, pure-function — no new async/await, no blocking
 
 4. **`lib/bootstrap.ts`**
-   - Extend the startup notification payload to include the active conclusions filter:
-     - `null` → `"default (failures + cancellations + timeouts + action_required)"`
+   - Extract a new pure helper `formatConclusionsSummary(conclusions: string[] | null): string` (exported for Phase 2 testing):
+     - `null` → `"default (failures)"` (literal, matches spec wording)
      - `['all']` → `"all"`
      - explicit list → joined comma-separated (e.g., `"failure, success"`)
-   - Exact wording to match the existing banner style; single additional line or appended field
+   - Extend the startup notification payload to include the active conclusions filter via `formatConclusionsSummary(config.conclusions)` — single additional line or appended field, matching the existing banner style
 
 5. **`README.md`**
    - New "Filtering by conclusion" subsection under configuration / options, documenting the flag, the default, and the `all` opt-out
@@ -92,17 +92,33 @@ Add the conclusions filter end-to-end: config → handler → startup banner →
 7. **`package.json` / `package-lock.json`**
    - Version bump to `0.6.0` (minor — user-visible behavior change)
 
+8. **Existing test `Config` fixtures** — mechanical updates to satisfy the expanded `Config` interface and preserve existing test intent:
+
+   | File | Fixture | `conclusions` value | Why |
+   |------|---------|---------------------|-----|
+   | `tests/integration.test.ts:33` | `testConfig` | `null` | Default behavior; other tests use `testConfig` for unrelated assertions |
+   | `tests/integration.test.ts:169` test | override on call | `['all']` | Test asserts "success event → notification" — preserve pre-filter behavior |
+   | `tests/integration-gitlab.test.ts:27` | `testConfig` | `null` | Same rationale as above |
+   | `tests/integration-gitlab.test.ts:162` test | override on call | `['all']` | Test asserts "running pipeline → notification" — preserve pre-filter behavior |
+   | `tests/integration-gitea.test.ts:32` | `testConfig` | `null` | Default |
+   | `tests/bootstrap.test.ts:7` | `makeConfig` helper | `null` | Default; existing callers unchanged |
+   | `tests/reconcile.test.ts:6` | `dummyConfig` | `null` | Default |
+   | `tests/forges/gitea.test.ts:48` | `dummyConfig` | `null` | Default |
+   | `tests/forges/gitlab.test.ts:7` | `dummyConfig` | `null` | Default |
+
+   These are mechanical updates — no new assertions, no new test cases. Phase 2 adds the new coverage.
+
 #### Success Criteria
 
-- Existing test suite passes: `npm test`
+- Full test suite passes: `npm test` (after the mechanical test-fixture updates in this phase)
 - Type-checks: `npm run build` produces no errors
-- Manual smoke: `npx tsx server.ts --conclusions failure` loads without error; `npx tsx server.ts --conclusions failure,all` errors with the specified message
+- Manual smoke: `npx tsx server.ts --conclusions failure` loads without error; `npx tsx server.ts --conclusions failure,all` errors with the documented message
 - Version in `package.json` is `0.6.0`
-- Banner output confirmed manually by running the server once and inspecting the startup notification
+- Banner output confirmed manually by running the server once and inspecting the startup notification — contains the literal string `default (failures)` when no flag is supplied
 
 #### Tests
 
-None new in Phase 1. Regression-only.
+No *new* tests in Phase 1. Mechanical updates to existing fixtures only (see file table above). New coverage for the filter itself is Phase 2.
 
 #### Commit
 
@@ -120,7 +136,7 @@ Add automated tests covering all 12 scenarios from the spec's Test Scenarios sec
 
 #### Files modified
 
-1. **`tests/webhook.test.ts`** (or wherever `isWorkflowAllowed` is tested — follow convention)
+1. **`tests/webhook.test.ts`** (follow `isWorkflowAllowed` test location convention)
    - `normalizeConclusion` pure-function tests:
      - Lowercasing (`"FAILURE"` → `"failure"`)
      - American → British (`"canceled"` → `"cancelled"`, `"failed"` → `"failure"`)
@@ -135,18 +151,24 @@ Add automated tests covering all 12 scenarios from the spec's Test Scenarios sec
      - T8: novel `'xyz'` forwarded under default; dropped under `['failure']`
      - T4: `['all']` forwards both `success` and `failure`
 
-2. **`tests/config.test.ts`** (or wherever `loadConfig` is tested — follow convention)
-   - T9: `--conclusions failure,all` throws with the documented error message
-   - T10: CLI `--conclusions failure` overrides `CONCLUSIONS=success` env var
+2. **`tests/config.test.ts`**
+   - **Prerequisite**: append `'CONCLUSIONS'` to the `envKeys` save/restore array at the top of the file before any new test cases, to prevent env-state leakage
+   - T9: `--conclusions failure,all` throws with the documented error message (string match: `Invalid --conclusions value: "all" may only appear as a standalone sentinel.`)
+   - T10a: CLI `--conclusions failure` overrides `CONCLUSIONS=success` env var
+   - T10b: `CONCLUSIONS=failure` env var overrides `CONCLUSIONS=success` written to `.env` file when no CLI flag
    - T11: `--conclusions failure,SUCCESS` produces `config.conclusions === ['failure', 'success']` (lowercased + normalized)
-   - T4-variant: `--conclusions ALL` produces `config.conclusions === ['all']`
+   - T4-config: `--conclusions ALL` produces `config.conclusions === ['all']` (lowercased, single-element sentinel)
 
-3. **`tests/handler.test.ts`** (integration)
-   - Handler integration covering the wiring: a fake `config.conclusions = ['failure']` with a `success` event produces no notification; with a `failure` event produces one notification. Builds on the existing handler-test scaffolding (whatever the project uses for mocking MCP + forge).
+3. **`tests/integration.test.ts`** (new handler-integration coverage lives in the existing integration files, not a new `handler.test.ts`)
+   - Integration test: with `config.conclusions = ['failure']` and a `success` event posted, the handler returns 200 but emits no notification; with a `failure` event it emits exactly one. Uses the same MCP + server scaffolding already in the file.
+   - Repeat the same assertion pattern in `tests/integration-gitlab.test.ts` (and optionally `integration-gitea.test.ts`) to confirm cross-forge uniformity — the spec requires the filter to apply to all three forges.
 
-4. **`tests/bootstrap.test.ts`** (or equivalent for T12, if startup-banner tests exist)
-   - T12: startup banner includes the literal filter description for all three states (null / `all` / custom)
-   - If no bootstrap test exists today, add a minimal pure-function test against whatever formatter `bootstrap.ts` uses. If the banner is built inline, extract a small pure formatter (`formatConclusionsSummary(config.conclusions): string`) to `lib/bootstrap.ts` and test that.
+4. **`tests/bootstrap.test.ts`**
+   - T12: test `formatConclusionsSummary` directly (exported from `lib/bootstrap.ts` in Phase 1) for all three states:
+     - `null` → `"default (failures)"`
+     - `['all']` → `"all"`
+     - `['failure', 'success']` → `"failure, success"`
+   - If the existing bootstrap banner tests exercise the integration end-to-end, extend one of them to confirm the summary appears in the notification payload.
 
 #### Success Criteria
 
