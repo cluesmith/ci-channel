@@ -13,6 +13,7 @@ const dummyConfig: Config = {
   reconcileBranches: ['ci', 'develop'],
   giteaUrl: null,
   giteaToken: null,
+  conclusions: null,
 }
 
 // Note: runStartupReconciliation is harder to unit test because it spawns

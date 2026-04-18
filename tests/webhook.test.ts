@@ -2,7 +2,7 @@ import { describe, test, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHmac } from 'node:crypto'
 import { githubForge } from '../lib/forges/github.js'
-import { isDuplicate, clearDedup, isRepoAllowed, isWorkflowAllowed } from '../lib/webhook.js'
+import { isDuplicate, clearDedup, isRepoAllowed, isWorkflowAllowed, isConclusionAllowed, normalizeConclusion } from '../lib/webhook.js'
 
 const SECRET = 'test-secret-key'
 
@@ -268,5 +268,114 @@ describe('isWorkflowAllowed', () => {
 
   test('rejects with empty filter', () => {
     assert.strictEqual(isWorkflowAllowed('CI Validation', []), false)
+  })
+})
+
+describe('normalizeConclusion', () => {
+  test('lowercases input', () => {
+    assert.strictEqual(normalizeConclusion('FAILURE'), 'failure')
+    assert.strictEqual(normalizeConclusion('Success'), 'success')
+  })
+
+  test('maps failed to failure', () => {
+    assert.strictEqual(normalizeConclusion('failed'), 'failure')
+    assert.strictEqual(normalizeConclusion('FAILED'), 'failure')
+  })
+
+  test('maps canceled to cancelled', () => {
+    assert.strictEqual(normalizeConclusion('canceled'), 'cancelled')
+    assert.strictEqual(normalizeConclusion('CANCELED'), 'cancelled')
+  })
+
+  test('leaves canonical values unchanged', () => {
+    assert.strictEqual(normalizeConclusion('failure'), 'failure')
+    assert.strictEqual(normalizeConclusion('cancelled'), 'cancelled')
+    assert.strictEqual(normalizeConclusion('success'), 'success')
+  })
+
+  test('is idempotent', () => {
+    const once = normalizeConclusion('Failed')
+    assert.strictEqual(normalizeConclusion(once), once)
+  })
+})
+
+describe('isConclusionAllowed — default filter (allowlist === null)', () => {
+  test('drops success', () => {
+    assert.strictEqual(isConclusionAllowed('success', null), false)
+  })
+
+  test('drops skipped, neutral, manual, stale', () => {
+    for (const c of ['skipped', 'neutral', 'manual', 'stale']) {
+      assert.strictEqual(isConclusionAllowed(c, null), false, `expected ${c} dropped`)
+    }
+  })
+
+  test('drops in-progress / non-terminal states', () => {
+    for (const c of ['requested', 'in_progress', 'completed', 'running', 'pending', 'queued', 'waiting', 'preparing']) {
+      assert.strictEqual(isConclusionAllowed(c, null), false, `expected ${c} dropped`)
+    }
+  })
+
+  test('drops GitLab-specific non-terminal states', () => {
+    // GitLab emits these for pipelines that haven't reached a terminal outcome.
+    for (const c of ['created', 'waiting_for_resource', 'scheduled']) {
+      assert.strictEqual(isConclusionAllowed(c, null), false, `expected ${c} dropped`)
+    }
+  })
+
+  test('forwards failure, cancelled, timed_out', () => {
+    assert.strictEqual(isConclusionAllowed('failure', null), true)
+    assert.strictEqual(isConclusionAllowed('cancelled', null), true)
+    assert.strictEqual(isConclusionAllowed('timed_out', null), true)
+  })
+
+  test('forwards action_required', () => {
+    assert.strictEqual(isConclusionAllowed('action_required', null), true)
+  })
+
+  test('forwards unknown strings (fail-open for novel forge outcomes)', () => {
+    assert.strictEqual(isConclusionAllowed('xyz', null), true)
+    assert.strictEqual(isConclusionAllowed('', null), true)
+    assert.strictEqual(isConclusionAllowed('unknown', null), true)
+  })
+
+  test('normalizes cross-forge terminology on input', () => {
+    // GitLab emits 'failed' / 'canceled' — default filter drops or forwards
+    // based on normalized form.
+    assert.strictEqual(isConclusionAllowed('failed', null), true) // -> 'failure' -> forwarded
+    assert.strictEqual(isConclusionAllowed('canceled', null), true) // -> 'cancelled' -> forwarded
+  })
+})
+
+describe('isConclusionAllowed — all sentinel', () => {
+  test('forwards everything when allowlist is ["all"]', () => {
+    assert.strictEqual(isConclusionAllowed('success', ['all']), true)
+    assert.strictEqual(isConclusionAllowed('failure', ['all']), true)
+    assert.strictEqual(isConclusionAllowed('running', ['all']), true)
+    assert.strictEqual(isConclusionAllowed('xyz', ['all']), true)
+    assert.strictEqual(isConclusionAllowed('', ['all']), true)
+  })
+})
+
+describe('isConclusionAllowed — explicit inclusion list', () => {
+  test('forwards only values in the list', () => {
+    assert.strictEqual(isConclusionAllowed('failure', ['failure', 'success']), true)
+    assert.strictEqual(isConclusionAllowed('success', ['failure', 'success']), true)
+    assert.strictEqual(isConclusionAllowed('cancelled', ['failure', 'success']), false)
+  })
+
+  test('matches across forge terminology via normalization', () => {
+    // 'failed' (GitLab) normalizes to 'failure' and matches ['failure']
+    assert.strictEqual(isConclusionAllowed('failed', ['failure']), true)
+    // 'canceled' (GitLab) normalizes to 'cancelled' and matches ['cancelled']
+    assert.strictEqual(isConclusionAllowed('canceled', ['cancelled']), true)
+  })
+
+  test('drops empty / unknown / non-terminal when list is explicit', () => {
+    assert.strictEqual(isConclusionAllowed('', ['failure']), false)
+    assert.strictEqual(isConclusionAllowed('unknown', ['failure']), false)
+    assert.strictEqual(isConclusionAllowed('xyz', ['failure']), false)
+    assert.strictEqual(isConclusionAllowed('running', ['failure']), false)
+    assert.strictEqual(isConclusionAllowed('success', ['failure']), false)
   })
 })

@@ -34,6 +34,8 @@ const testConfig: Config = {
   reconcileBranches: ['main'],
   giteaUrl: null,
   giteaToken: null,
+  // 'all' preserves pre-filter coverage including the "running pipeline state" test.
+  conclusions: ['all'],
 }
 
 function readBody(req: IncomingMessage): Promise<string> {
@@ -222,6 +224,58 @@ describe('integration: GitLab webhook pipeline', () => {
       assert.strictEqual(restrictedMcp.notifications.length, 0) // repo not in allowlist
     } finally {
       restrictedServer.close()
+    }
+  })
+
+  test('default conclusions filter drops running pipeline but forwards failed pipeline', async () => {
+    // GitLab emits "failed" (not "failure") — verify the filter normalizes cross-forge.
+    const filteredMcp = createMockMcp()
+    const filteredConfig: Config = { ...testConfig, conclusions: null }
+    const handler = createWebhookHandler(filteredConfig, filteredMcp as any, gitlabForge)
+
+    const filteredServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+      const url = new URL(req.url ?? '/', 'http://127.0.0.1')
+      if (req.method === 'POST' && url.pathname === '/webhook') {
+        const body = await readBody(req)
+        const headers = new Headers()
+        for (const [k, v] of Object.entries(req.headers)) {
+          if (typeof v === 'string') headers.set(k, v)
+        }
+        const webReq = new Request(url.href, { method: 'POST', headers, body })
+        const webRes = await handler(webReq)
+        res.writeHead(webRes.status)
+        res.end(await webRes.text())
+        return
+      }
+      res.writeHead(404)
+      res.end('Not Found')
+    })
+    await new Promise<void>(resolve => filteredServer.listen(0, '127.0.0.1', resolve))
+    const fAddr = filteredServer.address() as { port: number }
+
+    try {
+      const raw = readFileSync(join(fixtureDir, 'gitlab-pipeline-failure.json'), 'utf-8')
+
+      // Running pipeline → dropped (in default exclusion set)
+      const runningPayload = raw.replace('"failed"', '"running"')
+      const r1 = await fetch(`http://127.0.0.1:${fAddr.port}/webhook`, {
+        method: 'POST',
+        body: runningPayload,
+        headers: { 'Content-Type': 'application/json', 'x-gitlab-token': SECRET, 'x-gitlab-event': 'Pipeline Hook' },
+      })
+      assert.strictEqual(r1.status, 200)
+      assert.strictEqual(filteredMcp.notifications.length, 0)
+
+      // Failed pipeline → forwarded (normalizes to 'failure', not in exclusion set)
+      const r2 = await fetch(`http://127.0.0.1:${fAddr.port}/webhook`, {
+        method: 'POST',
+        body: raw,
+        headers: { 'Content-Type': 'application/json', 'x-gitlab-token': SECRET, 'x-gitlab-event': 'Pipeline Hook' },
+      })
+      assert.strictEqual(r2.status, 200)
+      assert.strictEqual(filteredMcp.notifications.length, 1)
+    } finally {
+      filteredServer.close()
     }
   })
 })

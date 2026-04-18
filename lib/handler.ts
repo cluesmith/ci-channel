@@ -1,7 +1,7 @@
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import type { Config } from './config.js'
 import type { Forge } from './forge.js'
-import { isDuplicate, isRepoAllowed, isWorkflowAllowed } from './webhook.js'
+import { isConclusionAllowed, isDuplicate, isRepoAllowed, isWorkflowAllowed } from './webhook.js'
 import { formatNotification, pushNotification, sanitize } from './notify.js'
 
 export function createWebhookHandler(config: Config, mcp: Server, forge: Forge) {
@@ -41,11 +41,16 @@ export function createWebhookHandler(config: Config, mcp: Server, forge: Forge) 
       return new Response('ok')
     }
 
-    // Step 6: Format and push notification immediately (never blocked by enrichment)
+    // Step 6: Check conclusion filter
+    if (!isConclusionAllowed(event.conclusion, config.conclusions)) {
+      return new Response('ok')
+    }
+
+    // Step 7: Format and push notification immediately (never blocked by enrichment)
     const notification = formatNotification(event)
     await pushNotification(mcp, notification)
 
-    // Step 7: Async enrichment — fire-and-forget, never blocks the response
+    // Step 8: Async enrichment — fire-and-forget, never blocks the response
     if (event.repoFullName && event.runId) {
       forge.fetchFailedJobs(config, event.repoFullName, event.runId).then(jobs => {
         if (jobs && jobs.length > 0) {

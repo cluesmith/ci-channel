@@ -1,0 +1,36 @@
+This is an excellent implementation. The code cleanly matches the specification, adheres to the project's existing architectural patterns, provides comprehensive test coverage, and accurately updates all relevant documentation. 
+
+I've verified the changes across the implementation:
+- **`lib/config.ts`**: The CLI argument and environment variable parsing correctly enforce precedence, properly reject invalid `all` semantics at load-time, and appropriately use cross-forge normalization.
+- **`lib/webhook.ts`**: The pure functions `normalizeConclusion` and `isConclusionAllowed` are robust, and the default exclusion list (`DEFAULT_EXCLUDED_CONCLUSIONS`) accurately matches the specified behavior to ensure fail-open forwarding for unknown conditions while suppressing known non-terminal and non-failure events.
+- **`lib/handler.ts`**: The pipeline integration perfectly fits the existing structure, adding the filter efficiently before the notification logic. 
+- **Tests**: The implementation elegantly refactors existing integration tests (setting `conclusions: ['all']`) to prevent regressions, while also delivering extensive new scenarios (`tests/webhook.test.ts`, `tests/integration.test.ts`, `tests/bootstrap.test.ts`) covering default, inclusion-list, cross-forge edge-cases, and config prioritization behavior.
+
+Everything looks ready to be handed off. 
+
+---
+VERDICT: APPROVE
+SUMMARY: The `--conclusions` filter feature is fully implemented, thoroughly tested, and perfectly aligns with the specification and project architecture.
+CONFIDENCE: HIGH
+---
+KEY_ISSUES:
+- None
+
+PR_SUMMARY: |
+  ## Summary
+  Adds a `--conclusions` CLI flag (and matching `CONCLUSIONS` env var) to filter `ci-channel` notifications by run outcome. The channel is marketed as a CI **failure** alerting tool, but it previously forwarded every pipeline event regardless of outcome. This PR changes the default behavior to enforce strict failure-only alerting, dropping known non-failure states and in-progress noise, while maintaining an escape hatch (`--conclusions all`) for the old behavior.
+
+  ## Key Changes
+  - Changes default pipeline behavior to drop `success`, `skipped`, `neutral`, `manual`, `stale` alongside in-progress events (`requested`, `running`, `pending`, etc.).
+  - Forwards `failure`, `cancelled`, `timed_out`, `action_required`, and novel/unrecognized forge outcomes by default.
+  - Adds the `--conclusions` config flag with cross-forge normalization (`failed` ≡ `failure`, `canceled` ≡ `cancelled`), and supports explicit custom inclusion lists.
+  - Exposes active filter status in the bootstrap startup notification banner.
+  - Updates documentation (README.md, INSTALL.md, AGENTS.md, CLAUDE.md) highlighting the new flag, defaults, and the upgrade path for users.
+  - Version bump to 0.6.0.
+
+  ## Test Plan
+  - `npm run build` to verify type safety over the extended `Config` interface changes.
+  - `npm test` checks all 237 tests to assert functionality. Validation includes:
+    - End-to-end integration tests over default exclusion handling (`tests/integration.test.ts`).
+    - Cross-forge normalization filtering (`tests/integration-gitlab.test.ts`).
+    - Core logic and CLI priority resolution tests across config loading (`tests/config.test.ts`) and pure payload assessment (`tests/webhook.test.ts`).

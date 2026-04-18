@@ -1,0 +1,19 @@
+This is a well-structured, thorough plan that cleanly maps to the spec requirements and accurately reflects the existing codebase. You've placed the logic in exactly the right places, kept the filtering synchronous, and maintained the pure-function testability of the core logic.
+
+I have verified against the filesystem that your chosen files (`lib/config.ts`, `lib/webhook.ts`, `lib/handler.ts`, `lib/bootstrap.ts`) and your strategy for `splitCommaList`, CLI flag parsing, and startup banners align perfectly with the current architecture.
+
+A couple of minor notes to assist the builder during implementation:
+
+1. **Test Configuration Mocks:** Adding `conclusions` to the `Config` interface will break type-checking in several test files that use mock config objects (e.g., `tests/integration.test.ts`, `tests/reconcile.test.ts`, `tests/forges/gitlab.test.ts`, `tests/forges/gitea.test.ts`). The builder will need to add `conclusions: null` to all of these mocks. Your success criteria (`npm run build` produces no errors) will implicitly catch this, but it's good to be aware.
+2. **Handler Tests:** You mentioned `tests/handler.test.ts (integration)` in Phase 2. The project doesn't have a `handler.test.ts` file; its handler integration tests live in `tests/integration.test.ts`, `tests/integration-gitlab.test.ts`, and `tests/integration-gitea.test.ts`. Your note "whatever the project uses for mocking MCP + forge" perfectly covers this, so the builder should add the test to `tests/integration.test.ts`.
+3. **Double Normalization:** In Phase 1, you noted that `lib/webhook.ts` `isConclusionAllowed` "normalizes both sides and returns `allowlist.includes(normalized)`". Since `lib/config.ts` will already be calling `normalizeConclusion` on each entry of the allowlist at load-time, you technically only need to normalize the event's `conclusion` side during the webhook handler step. Either approach works, but normalizing only the event at runtime is slightly more efficient.
+
+Overall, excellent work.
+
+---
+VERDICT: APPROVE
+SUMMARY: Excellent plan that thoroughly meets the spec requirements, correctly navigates the existing codebase, and structures the tests perfectly.
+CONFIDENCE: HIGH
+---
+KEY_ISSUES:
+- None

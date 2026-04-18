@@ -13,6 +13,7 @@ const savedEnv: Record<string, string | undefined> = {}
 const envKeys = [
   'WEBHOOK_SECRET', 'PORT', 'SMEE_URL', 'GITHUB_REPOS', 'REPOS',
   'WORKFLOW_FILTER', 'RECONCILE_BRANCHES', 'FORGE', 'GITEA_URL', 'GITEA_TOKEN',
+  'CONCLUSIONS',
 ]
 
 function saveEnv() {
@@ -283,5 +284,55 @@ describe('loadConfig: CLI arg parsing', () => {
     process.env.GITEA_TOKEN = 'my-token'
     const config = loadConfig(envPath, [], join(tmpDir, 'state.json'))
     assert.strictEqual(config.giteaToken, 'my-token')
+  })
+
+  // --- conclusions filter (spec 13) ---
+
+  test('conclusions defaults to null when not set', () => {
+    const config = loadConfig(envPath, [], join(tmpDir, 'state.json'))
+    assert.strictEqual(config.conclusions, null)
+  })
+
+  test('--conclusions ALL normalizes to single-element sentinel', () => {
+    const config = loadConfig(envPath, ['--conclusions', 'ALL'])
+    assert.deepStrictEqual(config.conclusions, ['all'])
+  })
+
+  test('--conclusions normalizes case and spelling variants', () => {
+    const config = loadConfig(envPath, ['--conclusions', 'FAILURE,Canceled,SUCCESS'])
+    assert.deepStrictEqual(config.conclusions, ['failure', 'cancelled', 'success'])
+  })
+
+  test('--conclusions rejects mixed all,X lists', () => {
+    assert.throws(
+      () => loadConfig(envPath, ['--conclusions', 'failure,all']),
+      { message: /"all" may only appear as a standalone sentinel/ },
+    )
+  })
+
+  test('--conclusions rejects reverse mixed (all,X) lists', () => {
+    assert.throws(
+      () => loadConfig(envPath, ['--conclusions', 'all,success']),
+      { message: /"all" may only appear as a standalone sentinel/ },
+    )
+  })
+
+  test('--conclusions CLI arg takes precedence over CONCLUSIONS env var', () => {
+    process.env.CONCLUSIONS = 'success'
+    const config = loadConfig(envPath, ['--conclusions', 'failure'])
+    assert.deepStrictEqual(config.conclusions, ['failure'])
+  })
+
+  test('CONCLUSIONS env var takes precedence over CONCLUSIONS in .env file', () => {
+    writeEnvFile('CONCLUSIONS=success')
+    process.env.CONCLUSIONS = 'failure'
+    const config = loadConfig(envPath, [], join(tmpDir, 'state.json'))
+    assert.deepStrictEqual(config.conclusions, ['failure'])
+  })
+
+  test('CONCLUSIONS loaded from .env file when no env or CLI', () => {
+    writeEnvFile('CONCLUSIONS=failure,success')
+    const config = loadConfig(envPath, [], join(tmpDir, 'state.json'))
+    assert.deepStrictEqual(config.conclusions, ['failure', 'success'])
   })
 })

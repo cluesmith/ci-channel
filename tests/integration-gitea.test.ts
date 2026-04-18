@@ -39,6 +39,7 @@ const testConfig: Config = {
   reconcileBranches: ['develop'],
   giteaUrl: 'https://gitea.example.com',
   giteaToken: null,
+  conclusions: null,
 }
 
 function readBody(req: IncomingMessage): Promise<string> {

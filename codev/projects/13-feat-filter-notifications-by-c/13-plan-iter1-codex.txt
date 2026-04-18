@@ -1,0 +1,67 @@
+I reviewed the plan against the spec and checked the actual project files (`lib/config.ts`, `lib/webhook.ts`, `lib/handler.ts`, `lib/bootstrap.ts`, `server.ts`, and relevant tests).
+
+The overall architecture is sound: adding `conclusions` to config, centralizing normalization/filtering in `lib/webhook.ts`, and applying it once in the shared handler pipeline matches the spec and project architecture well. The implementation is appropriately forge-agnostic and low-risk.
+
+However, the plan needs changes before it is builder-ready.
+
+Main concerns:
+
+1. **Phase 1 says existing tests must pass, but existing tests will fail after the behavior change.**  
+   Current tests explicitly assert the old “success/running notifications are forwarded” behavior:
+   - `tests/integration.test.ts` has `success event → 200 + notification with conclusion field`
+   - `tests/integration-gitlab.test.ts` has `running pipeline state → 200, notification`
+
+   With the new default `conclusions: null`, both `success` and `running` should be dropped. The plan’s Phase 1 modifies no tests but requires `npm test` to pass, which is inconsistent. Phase 1 must either:
+   - update existing tests to the new default behavior, or
+   - explicitly set `conclusions: ['all']` in legacy tests that are meant to preserve “old behavior” coverage.
+
+2. **The startup banner wording in the plan does not match the spec.**  
+   The spec says the default banner should include the string:
+
+   ```text
+   default (failures)
+   ```
+
+   The plan proposes:
+
+   ```text
+   default (failures + cancellations + timeouts + action_required)
+   ```
+
+   That may be more descriptive, but it is not what the approved spec states. Either align the plan to the spec or explicitly call out this intentional deviation for approval.
+
+3. **Config precedence tests are incomplete for the new field.**  
+   The spec’s test scenario 10 says:
+
+   > CLI flag beats env var beats `.env` file
+
+   The plan only lists a test for CLI overriding `CONCLUSIONS`. It should also include a `CONCLUSIONS` env var overriding `.env` test for the new field, not just rely on existing precedence tests for other fields.
+
+4. **All test fixture/helper `Config` objects need a `conclusions` field added or intentionally handled.**  
+   There are many test-local `Config` objects. Even if `tsx` does not type-check tests during `npm test`, these objects are project conventions and should be updated for clarity. Examples include:
+   - `tests/bootstrap.test.ts` `makeConfig`
+   - `tests/integration.test.ts` `testConfig`
+   - `tests/integration-gitlab.test.ts` `testConfig`
+   - `tests/integration-gitea.test.ts` `testConfig`
+
+5. **The phase split is a little artificial for this change.**  
+   Because this is a behavior change that immediately invalidates existing tests, separating production changes from test changes makes Phase 1 hard to validate independently. If the project requires separate commits, Phase 1 should still include required updates to existing tests so the suite remains green, while Phase 2 can add new coverage.
+
+Recommended adjustments:
+- Move “update existing tests affected by default filtering” into Phase 1.
+- Add `conclusions: null` or `conclusions: ['all']` explicitly to test configs depending on each test’s intent.
+- Add env-over-`.env` coverage for `CONCLUSIONS`.
+- Align the bootstrap summary wording with the exact spec, or note the deviation.
+- Consider extracting `formatConclusionsSummary()` during Phase 1 if banner tests are expected in Phase 2; that will make T12 cleaner.
+
+---
+VERDICT: REQUEST_CHANGES
+SUMMARY: The technical approach is solid, but the phase plan is inconsistent with existing tests and misses a few spec-alignment details.
+CONFIDENCE: HIGH
+---
+
+KEY_ISSUES:
+- Phase 1 claims `npm test` passes without modifying existing tests that will fail under the new default filter.
+- Startup banner wording in the plan does not match the approved spec’s required `default (failures)` wording.
+- New config precedence tests do not fully cover env var over `.env` for `CONCLUSIONS`.
+- Existing test `Config` objects need explicit `conclusions` handling for clarity and correctness.

@@ -1,0 +1,81 @@
+I'll read all the relevant test files and production code to review this phase thoroughly.Now let me read the production code these tests exercise:Now let me check the remaining modified test fixture files and verify the test suite passes:Let me run the test suite to verify everything passes:All 237 tests pass (2 skipped are pre-existing flaky tests on main, not related to this phase). Let me now systematically verify the test coverage against the spec's 12 test scenarios.
+
+---
+
+## Review: Phase `tests` — Filter Notifications by Conclusion
+
+### 1. Spec Scenario Mapping
+
+I checked every one of the 12 spec test scenarios against the implemented tests:
+
+| Spec # | Scenario | Test Location | Status |
+|--------|----------|--------------|--------|
+| T1 | Default filter, success dropped | `webhook.test.ts:303` + `integration.test.ts:350` | ✅ |
+| T2 | Default filter, in-progress dropped | `webhook.test.ts:313-317` (all 8 values) | ✅ |
+| T3 | Default filter, action_required forwarded | `webhook.test.ts:325` | ✅ |
+| T4 | `all` opt-out | `webhook.test.ts:343-350` + `config.test.ts:296` | ✅ |
+| T5 | Custom inclusion list | `webhook.test.ts:353-358` | ✅ |
+| T6 | Cross-forge terminology | `webhook.test.ts:360-364` + `integration-gitlab.test.ts:230` | ✅ |
+| T7 | Empty/unknown conclusion | `webhook.test.ts:329-333` (default) + `webhook.test.ts:367-370` (explicit) | ✅ |
+| T8 | Novel unknown conclusion | `webhook.test.ts:329` (default, `'xyz'`) + `webhook.test.ts:371` (explicit) | ✅ |
+| T9 | Mixed `all` rejected | `config.test.ts:306-318` (both `failure,all` and `all,success`) | ✅ |
+| T10 | Config precedence | `config.test.ts:320-337` (CLI > env, env > .env, .env fallback) | ✅ |
+| T11 | Config normalization | `config.test.ts:301-303` (`FAILURE,Canceled,SUCCESS` → normalized) | ✅ |
+| T12 | Startup banner | `bootstrap.test.ts:190-248` (all three modes + banner integration) | ✅ |
+
+All 12 spec scenarios are covered.
+
+### 2. Code Quality
+
+**Tests are well-structured:**
+- `normalizeConclusion` unit tests cover lowercasing, spelling canonicalization (`failed`→`failure`, `canceled`→`cancelled`), idempotency — clean, minimal, readable.
+- `isConclusionAllowed` tests are organized into three clear `describe` blocks (default/all/explicit), each testing the distinct behavior mode.
+- Config tests properly save/restore env vars and include `CONCLUSIONS` in the `envKeys` array (preventing env leakage between tests).
+- Integration tests use a `withFilteredHandler` helper that stands up isolated HTTP servers per test — good isolation pattern.
+- The GitLab integration test (`integration-gitlab.test.ts:230`) is particularly valuable: it sends a `"running"` payload (dropped) then a `"failed"` payload (forwarded via normalization) against the default filter, exercising the cross-forge normalization end-to-end.
+
+**No issues found:**
+- No obvious bugs in the test logic.
+- Assertions are tight — checking both status codes and notification counts.
+- Edge cases (empty string, `'unknown'`, `'xyz'`) are all covered.
+
+### 3. Plan Alignment
+
+The plan for Phase 2 specified:
+
+1. **`tests/webhook.test.ts`**: `normalizeConclusion` + `isConclusionAllowed` pure-function tests → ✅ Done
+2. **`tests/config.test.ts`**: `CONCLUSIONS` in `envKeys`, T9/T10/T11/T4 config tests → ✅ Done (also includes `.env` file fallback test, which exceeds plan)
+3. **`tests/integration.test.ts`**: handler integration with conclusion filter → ✅ Done
+4. **`tests/integration-gitlab.test.ts`**: cross-forge integration → ✅ Done
+5. **`tests/bootstrap.test.ts`**: `formatConclusionsSummary` unit tests + banner integration → ✅ Done
+
+The plan mentioned optionally adding Gitea integration tests. The builder chose not to, which is fine — the Gitea integration test file already uses `conclusions: null` (default filter) which implicitly exercises the filter for failure events, and the filter logic is forge-agnostic by design.
+
+### 4. Test Fixture Updates (Phase 1 carry-over verification)
+
+All `Config` fixtures have the `conclusions` field:
+- `integration.test.ts:46` → `conclusions: ['all']` (preserves pre-filter test behavior) ✅
+- `integration-gitlab.test.ts:38` → `conclusions: ['all']` ✅
+- `integration-gitea.test.ts:42` → `conclusions: null` ✅
+- `bootstrap.test.ts:18` → `conclusions: null` ✅
+- `reconcile.test.ts:16` → `conclusions: null` ✅
+- `forges/gitea.test.ts:48` → `conclusions: null` ✅
+- `forges/gitlab.test.ts:7` → `conclusions: null` ✅
+
+### 5. Minor Observations (non-blocking)
+
+- The `integration-gitea.test.ts` file uses `conclusions: null` (default filter), which means its existing "non-completed action → 200, notification" test (line 173) sends a `"failure"` conclusion event — this passes the default filter, so it works. Good.
+- All 237 tests pass, 0 failures, only the 2 pre-existing skipped tests.
+
+---
+
+### Verdict
+
+---
+VERDICT: APPROVE
+SUMMARY: All 12 spec test scenarios are covered with clean, well-structured tests across unit, config, integration, and banner layers; full suite passes (237/237).
+CONFIDENCE: HIGH
+---
+
+KEY_ISSUES:
+- None

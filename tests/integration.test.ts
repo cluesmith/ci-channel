@@ -40,6 +40,10 @@ const testConfig: Config = {
   reconcileBranches: ['ci', 'develop'],
   giteaUrl: null,
   giteaToken: null,
+  // Use 'all' sentinel so existing tests (including "success event → notification")
+  // keep pre-filter coverage. The default-filter behavior is covered by new tests
+  // in Phase 2.
+  conclusions: ['all'],
 }
 
 function readBody(req: IncomingMessage): Promise<string> {
@@ -286,5 +290,100 @@ describe('integration: HTTP webhook pipeline', () => {
 
     assert.strictEqual(res.status, 200)
     assert.ok(mockMcp.notifications.length >= 1)
+  })
+
+  // --- conclusion filter integration (spec 13) ---
+
+  // Helper: stand up a fresh server with a custom config and fire one request.
+  async function withFilteredHandler(
+    conclusions: string[] | null,
+    payloadTransform: (raw: string) => string,
+    deliveryId: string,
+  ): Promise<{ status: number; notifications: any[] }> {
+    const localMcp = createMockMcp()
+    const localConfig: Config = { ...testConfig, conclusions }
+    const localHandler = createWebhookHandler(localConfig, localMcp as any, githubForge)
+    const localServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+      try {
+        const url = new URL(req.url ?? '/', 'http://127.0.0.1')
+        if (req.method === 'POST' && url.pathname === '/webhook/github') {
+          const body = await readBody(req)
+          const headers = new Headers()
+          for (const [key, value] of Object.entries(req.headers)) {
+            if (typeof value === 'string') headers.set(key, value)
+            else if (Array.isArray(value)) for (const v of value) headers.append(key, v)
+          }
+          const webReq = new Request(url.href, { method: 'POST', headers, body })
+          const webRes = await localHandler(webReq)
+          res.writeHead(webRes.status)
+          res.end(await webRes.text())
+          return
+        }
+        res.writeHead(404)
+        res.end('Not Found')
+      } catch {
+        res.writeHead(500)
+        res.end('Internal Server Error')
+      }
+    })
+    await new Promise<void>(r => localServer.listen(0, '127.0.0.1', r))
+    const localAddr = localServer.address() as { port: number }
+    try {
+      const raw = readFileSync(join(fixtureDir, 'workflow-run-failure.json'), 'utf-8')
+      const payload = payloadTransform(raw)
+      const signature = sign(payload)
+      const res = await fetch(`http://127.0.0.1:${localAddr.port}/webhook/github`, {
+        method: 'POST',
+        body: payload,
+        headers: {
+          'x-hub-signature-256': signature,
+          'x-github-event': 'workflow_run',
+          'x-github-delivery': deliveryId,
+        },
+      })
+      return { status: res.status, notifications: localMcp.notifications }
+    } finally {
+      localServer.close()
+    }
+  }
+
+  test('default filter: success event → 200, no notification', async () => {
+    const { status, notifications } = await withFilteredHandler(
+      null,
+      raw => raw.replace('"failure"', '"success"'),
+      'int-filter-default-success',
+    )
+    assert.strictEqual(status, 200)
+    assert.strictEqual(notifications.length, 0)
+  })
+
+  test('default filter: failure event → 200, notification sent', async () => {
+    const { status, notifications } = await withFilteredHandler(
+      null,
+      raw => raw,
+      'int-filter-default-failure',
+    )
+    assert.strictEqual(status, 200)
+    assert.strictEqual(notifications.length, 1)
+  })
+
+  test('explicit --conclusions failure: success event dropped', async () => {
+    const { status, notifications } = await withFilteredHandler(
+      ['failure'],
+      raw => raw.replace('"failure"', '"success"'),
+      'int-filter-explicit-success',
+    )
+    assert.strictEqual(status, 200)
+    assert.strictEqual(notifications.length, 0)
+  })
+
+  test('explicit --conclusions failure: failure event forwarded', async () => {
+    const { status, notifications } = await withFilteredHandler(
+      ['failure'],
+      raw => raw,
+      'int-filter-explicit-failure',
+    )
+    assert.strictEqual(status, 200)
+    assert.strictEqual(notifications.length, 1)
   })
 })

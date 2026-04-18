@@ -1,6 +1,6 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { bootstrap, type BootstrapDeps } from '../lib/bootstrap.js'
+import { bootstrap, formatConclusionsSummary, type BootstrapDeps } from '../lib/bootstrap.js'
 import type { Config } from '../lib/config.js'
 import type { PluginState } from '../lib/state.js'
 
@@ -15,6 +15,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     reconcileBranches: ['ci', 'develop'],
     giteaUrl: null,
     giteaToken: null,
+    conclusions: null,
     ...overrides,
   }
 }
@@ -183,5 +184,66 @@ describe('bootstrap', () => {
 
     assert.strictEqual(result.webhookSecret, 'found-in-state')
     assert.strictEqual(result.wasProvisioned, true) // smee was still auto-provisioned
+  })
+})
+
+describe('formatConclusionsSummary', () => {
+  test('null → "default (failures)"', () => {
+    assert.strictEqual(formatConclusionsSummary(null), 'default (failures)')
+  })
+
+  test('["all"] → "all"', () => {
+    assert.strictEqual(formatConclusionsSummary(['all']), 'all')
+  })
+
+  test('explicit list → comma-joined', () => {
+    assert.strictEqual(formatConclusionsSummary(['failure', 'success']), 'failure, success')
+  })
+
+  test('single-item explicit list', () => {
+    assert.strictEqual(formatConclusionsSummary(['failure']), 'failure')
+  })
+})
+
+describe('bootstrap startup banner includes conclusions summary', () => {
+  test('default: banner contains "Conclusions: default (failures)"', async () => {
+    const deps = makeDeps()
+    await bootstrap(makeConfig(), 'http://127.0.0.1:1234/webhook', deps)
+    const setupNotif = deps.notifications.find(n => n.meta.setup === 'true')
+    assert.ok(setupNotif, 'expected a setup notification')
+    assert.ok(
+      setupNotif!.content.includes('Conclusions: default (failures)'),
+      `banner missing conclusions summary; got: ${setupNotif!.content}`,
+    )
+  })
+
+  test('explicit list: banner contains the joined list', async () => {
+    const deps = makeDeps()
+    await bootstrap(
+      makeConfig({ conclusions: ['failure', 'success'] }),
+      'http://127.0.0.1:1234/webhook',
+      deps,
+    )
+    const setupNotif = deps.notifications.find(n => n.meta.setup === 'true')
+    assert.ok(setupNotif, 'expected a setup notification')
+    assert.ok(
+      setupNotif!.content.includes('Conclusions: failure, success'),
+      `banner missing custom summary; got: ${setupNotif!.content}`,
+    )
+  })
+
+  test('all sentinel: banner contains "Conclusions: all"', async () => {
+    const deps = makeDeps()
+    await bootstrap(
+      makeConfig({ conclusions: ['all'] }),
+      'http://127.0.0.1:1234/webhook',
+      deps,
+    )
+    const setupNotif = deps.notifications.find(n => n.meta.setup === 'true')
+    assert.ok(setupNotif, 'expected a setup notification')
+    assert.ok(
+      setupNotif!.content.includes('Conclusions: all'),
+      `banner missing all summary; got: ${setupNotif!.content}`,
+    )
   })
 })

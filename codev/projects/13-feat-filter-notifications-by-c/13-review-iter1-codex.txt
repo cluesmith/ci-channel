@@ -1,0 +1,24 @@
+---
+VERDICT: REQUEST_CHANGES
+SUMMARY: Implementation is generally clean and well-tested, but the default filter misses a known GitLab non-terminal status that will still generate noise under the new “failures only” default.
+CONFIDENCE: HIGH
+---
+KEY_ISSUES:
+- `lib/webhook.ts` default exclusion set omits GitLab `created`. The existing codebase already recognizes this as a GitLab pipeline state (`tests/forges/gitlab.test.ts` has a “passes through created state” test), and it is non-terminal/in-progress rather than failure-like. With `conclusions: null`, `isConclusionAllowed('created', null)` currently returns `true`, so GitLab “created” pipeline webhooks will still notify by default, undermining the PR’s stated default failure-alert behavior. Add `created` to `DEFAULT_EXCLUDED_CONCLUSIONS` and add/extend tests for it. Consider auditing other GitLab non-terminal statuses as well.
+- I could not complete `npm test` in this read-only/restricted sandbox: failures were from `mkdtemp` EPERM and `listen 127.0.0.1` EPERM, not from the code under review. `npx tsc --noEmit` passes.
+
+PR_SUMMARY: |
+  ## Summary
+  Adds a configurable `--conclusions` / `CONCLUSIONS` filter so ci-channel can suppress non-failure CI events by default while still allowing users to opt back into all notifications with `--conclusions all`.
+
+  ## Key Changes
+  - Adds conclusion normalization and filtering helpers in `lib/webhook.ts`.
+  - Adds config parsing, precedence handling, and validation for `--conclusions`.
+  - Applies the conclusion filter in the shared webhook handler before notification formatting.
+  - Updates startup banner, README/INSTALL/agent docs, architecture notes, and tests.
+  - Bumps package version to `0.6.0`.
+
+  ## Test Plan
+  - `npx tsc --noEmit`
+  - `npm test`
+  - Manually verify `--conclusions all`, explicit lists, and invalid mixed `all` lists.

@@ -1,0 +1,99 @@
+I'll read all the key implementation files in parallel to review the phase `impl` work.Now let me read the test fixture updates in parallel:Now let me verify the test suite passes and check the remaining files:Let me verify the Gitea fixture to ensure the string replacement in integration-gitea test is safe:Let me check the AGENTS.md and CLAUDE.md updates:Good — both AGENTS.md and CLAUDE.md updated to include `--conclusions` in the structural config line. Let me do a final verification of the `package-lock.json` version:Here's my complete review:
+
+---
+
+## Implementation Review — Phase: `impl`
+
+### 1. Spec Adherence ✅
+
+Every Phase `impl` deliverable from the spec is present:
+
+| Requirement | Status | Location |
+|---|---|---|
+| `--conclusions` CLI flag | ✅ | `lib/config.ts:93` (knownFlags), `:167` (parsed) |
+| `CONCLUSIONS` env var | ✅ | `lib/config.ts:167` via `get('CONCLUSIONS', '--conclusions')` |
+| Default exclusion set | ✅ | `lib/webhook.ts:69-85` — exact match with spec's enumerated list |
+| `--conclusions all` disables filter | ✅ | `lib/webhook.ts:115-117` |
+| Explicit comma-separated inclusion list | ✅ | `lib/config.ts:167-176`, `lib/webhook.ts:119` |
+| Cross-forge normalization | ✅ | `normalizeConclusion`: `failed`→`failure`, `canceled`→`cancelled` |
+| Mixed `all,X` rejected at config-load | ✅ | `lib/config.ts:171-175` — exact error message matches spec |
+| Handler pipeline filter step | ✅ | `lib/handler.ts:44-46` (Step 6, between workflow filter and notify) |
+| Startup banner includes conclusions | ✅ | `lib/bootstrap.ts:86-87` via `formatConclusionsSummary` |
+| `formatConclusionsSummary` exported | ✅ | `lib/bootstrap.ts:19` — ready for Phase 2 testing |
+| README docs | ✅ | "Filtering by conclusion" section + config table + upgrade note |
+| INSTALL.md docs | ✅ | `--conclusions` in Optional flags section |
+| Version bump 0.6.0 | ✅ | `package.json` + `package-lock.json` |
+| AGENTS.md / CLAUDE.md updated | ✅ | `--conclusions` added to structural config line |
+
+### 2. Code Quality ✅
+
+**`lib/webhook.ts`** — Clean, well-structured additions:
+- `DEFAULT_EXCLUDED_CONCLUSIONS` is a `Set` (O(1) lookup), correctly uses `const` at module scope
+- `normalizeConclusion` is a pure function, simple and correct
+- `isConclusionAllowed` handles all three modes cleanly (null → default exclusion, `['all']` → pass-through, explicit → inclusion). The JSDoc comment is excellent
+- The `allowlist.length === 1 && allowlist[0] === 'all'` check is precise — avoids false positives
+
+**`lib/config.ts`** — The conclusions parsing follows the exact same pattern as existing config fields:
+- Config precedence preserved (CLI > env > .env, no state.json — spec says user intent only)
+- Normalization happens at load time (spec requirement: "normalization happens once at config-load time")
+- Validation is tight: only the `all`-mixed-with-others case is rejected
+
+**`lib/handler.ts`** — Minimal, surgical insertion:
+- Single filter step at exactly the right pipeline position (after workflow filter, before notification)
+- Synchronous, pure-function call — no new async/await as spec requires
+
+**`lib/bootstrap.ts`** — `formatConclusionsSummary` is clean:
+- Three states handled (`null` → `"default (failures)"`, `['all']` → `"all"`, explicit → comma-joined)
+- Integration into the existing notification is a single-line append, doesn't restructure the banner
+
+### 3. Test Fixture Updates ✅
+
+All mechanical updates are correct:
+
+| File | `conclusions` value | Rationale |
+|---|---|---|
+| `integration.test.ts` | `['all']` | Preserves "success event → notification" test |
+| `integration-gitlab.test.ts` | `['all']` | Preserves "running pipeline → notification" test |
+| `integration-gitea.test.ts` | `null` | All existing Gitea tests send failure conclusions — safe under default filter |
+| `bootstrap.test.ts` | `null` | Existing assertions check `'CI channel ready'` + `'all repos (no filter)'` — both still present in new format |
+| `reconcile.test.ts` | `null` | Default |
+| `forges/gitea.test.ts` | `null` | Default |
+| `forges/gitlab.test.ts` | `null` | Default |
+
+**Minor plan deviation (acceptable):** The plan specified `integration.test.ts:33` testConfig should use `null` with a per-test override to `['all']` at line 169. The builder instead put `['all']` on the global testConfig with a clear comment explaining why. This is actually *safer* — it prevents any existing test from accidentally hitting the default filter, and the comment (lines 43-46) documents the rationale. The new filter behavior will be covered by Phase 2 tests.
+
+### 4. Error Handling ✅
+
+- Config validation throws with the exact spec-mandated message: `Invalid --conclusions value: "all" may only appear as a standalone sentinel.`
+- Unknown values silently pass (spec: "a typo surfaces as 'no notifications match,' which is immediately visible")
+- Empty/`'unknown'` conclusions are forwarded under default, dropped under explicit list (spec-compliant)
+- `normalizeConclusion` handles any string defensively (lowercase first, then canonicalize)
+
+### 5. Build & Test Verification ✅
+
+- **`npm test`**: 201 pass, 0 fail, 2 skipped (pre-existing)
+- **`tsc --noEmit`**: Clean, no type errors
+- **Version**: `0.6.0` in both `package.json` and `package-lock.json`
+
+### 6. Documentation Quality ✅
+
+The README's "Filtering by conclusion" section is thorough:
+- Lists forwarded vs dropped defaults
+- Three `--conclusions` override examples with use cases
+- Notes on case-insensitivity, spelling equivalence, `all` sentinel semantics
+- Upgrade note for v0.6.0 users
+
+INSTALL.md update is concise and includes the upgrade migration note.
+
+---
+
+**No issues found.** The implementation is clean, spec-compliant, well-documented, and all tests pass. The single plan deviation (testConfig `['all']` vs `null` + per-test override) is a defensible improvement.
+
+---
+VERDICT: APPROVE
+SUMMARY: All Phase impl deliverables land correctly — config, filter helper, handler wiring, startup banner, docs, version bump, and mechanical test fixture updates all match the spec with no bugs.
+CONFIDENCE: HIGH
+---
+
+KEY_ISSUES:
+- None
