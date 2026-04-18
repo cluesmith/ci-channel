@@ -48,13 +48,13 @@ The filter is applied uniformly across all three forges (GitHub, GitLab, Gitea).
 
 ## Success Criteria
 - [ ] A new `--conclusions` CLI flag (and matching `CONCLUSIONS` env var) is recognized by `loadConfig`
-- [ ] When `--conclusions` is not supplied, the channel defaults to forwarding only **failure-like** outcomes; successful runs are silently dropped
-- [ ] `--conclusions all` (or the literal string `all`) disables the filter entirely, restoring pre-upgrade behavior
+- [ ] When `--conclusions` is not supplied, the channel forwards failure-like outcomes and drops known non-failure/in-progress outcomes (see "Default behavior" below)
+- [ ] `--conclusions all` (case-insensitive) disables the filter entirely, restoring pre-upgrade behavior
 - [ ] A user can pass an explicit comma-separated list of conclusion values (e.g. `failure,success,skipped`) and only matching events are forwarded
-- [ ] The filter applies uniformly to GitHub, GitLab, and Gitea — values from each forge's normalized `event.conclusion` pass through the same logic
-- [ ] Events whose `conclusion` is empty/null/unknown are forwarded by default (fail-open to avoid silently dropping legitimate events) — unless the explicit filter omits them
-- [ ] Tests cover: default filter behavior, `all` opt-out, custom lists, cross-forge terminology (`failed` vs `failure`, `canceled` vs `cancelled`), empty/null conclusions
+- [ ] The filter applies uniformly to GitHub, GitLab, and Gitea — values from each forge's `event.conclusion` pass through the same normalization + comparison
+- [ ] Tests cover: default filter behavior (including in-progress values), `all` opt-out, custom lists, cross-forge terminology (`failed` vs `failure`, `canceled` vs `cancelled`), empty/`'unknown'` conclusions, rejection of mixed `all,X` lists, config-layer integration (CLI flag → `config.conclusions`)
 - [ ] README and INSTALL docs describe the flag, the default, and the breaking-change upgrade note
+- [ ] The startup notification emitted by `bootstrap.ts` includes the active conclusions filter (literal list when custom, the string `"default (failures)"` when default, `"all"` when opted out)
 - [ ] All existing tests continue to pass
 
 ## Constraints
@@ -71,9 +71,11 @@ The filter is applied uniformly across all three forges (GitHub, GitLab, Gitea).
 - The change must be documented prominently in release notes for the version that ships this
 
 ## Assumptions
-- Each forge's `parseWebhookEvent` populates `event.conclusion` with a lowercase string (or empty string) for terminal states. If a forge ever emits an in-progress event with `null`, the filter must not crash.
+- `WebhookEvent.conclusion` remains typed as `string` (never null). Each forge's `parseWebhookEvent` already coerces missing values to `'unknown'` or to `payload.action`/`attrs.status`. The filter helper accepts any string, including empty, and normalizes defensively (lowercase + spelling canonicalization) rather than trusting that the parser already did so.
+- Forge webhook payloads use lowercase conclusion strings in practice, but the spec does not rely on this — normalization inside the filter is authoritative.
 - Users running into the current noise problem will welcome the stricter default; users who relied on the old "everything" behavior are a small minority and will be served by `--conclusions all`.
 - No existing user config field or env var conflicts with the name `CONCLUSIONS`.
+- `lib/reconcile.ts` and its forge-specific implementations already short-circuit on non-failure outcomes (GitHub: `if (run.conclusion !== 'failure') continue`; GitLab: `if (pipeline.status !== 'failed') continue`; Gitea: same). Reconciliation therefore does **not** need to run the new conclusion filter — it is already failure-only by construction. Scoping note below.
 
 ## Solution Approaches
 
@@ -123,15 +125,49 @@ The filter is applied uniformly across all three forges (GitHub, GitLab, Gitea).
 
 **Decision**: Approach 1.
 
+## Default Behavior (Exclusion-Based)
+
+The default filter is semantically an **exclusion list**, not an inclusion list. When `config.conclusions` is `null` (no CLI flag, no env var), the handler drops events whose normalized conclusion matches any of the following:
+
+- **Known non-failure terminal**: `success`, `skipped`, `neutral`, `manual`, `stale`
+- **Known non-terminal / in-progress**: `requested`, `in_progress`, `completed`, `running`, `pending`, `queued`, `waiting`, `preparing`
+
+All other events pass through the default filter — this includes the canonical failure-like values (`failure`, `cancelled`, `timed_out`, `action_required`) **and** any unknown string the filter hasn't been taught about (so a new forge outcome isn't silently dropped).
+
+When `config.conclusions` is an explicit list (e.g., `['failure', 'success']`), the filter is an **inclusion list** — only events whose normalized conclusion matches exactly are forwarded. Unknown strings are dropped in this mode because the user explicitly scoped the output.
+
+`config.conclusions === ['all']` (the `--conclusions all` sentinel) disables the filter entirely.
+
+## Semantics for `--conclusions` values
+
+- Case-insensitive throughout (input lowercased at config-load time)
+- Spelling canonicalized at config-load time: `failed` → `failure`, `canceled` → `cancelled`
+- `all` is valid only as a **standalone** value. Mixed lists like `failure,all` or `all,success` are rejected at config-load with a clear error: `Invalid --conclusions value: "all" may only appear as a standalone sentinel.`
+- Completely unknown configured values (e.g., `--conclusions foobar`) are accepted silently — they simply never match. Rationale: config validation should not own the canonical set (which may grow); a typo surfaces as "no notifications match," which is immediately visible.
+- Normalization happens once at config-load time for the user's allowlist, and once per event inside the filter helper. Both sides call the same `normalizeConclusion(s: string): string` pure function.
+
+## Reconciliation Scoping
+
+Startup reconciliation (`lib/reconcile.ts` + each forge's `runReconciliation`) is **out of scope** for this spec. All three forge implementations already emit events only when the last run failed:
+
+| Forge | Guard |
+|-------|-------|
+| GitHub | `if (run.conclusion !== 'failure') continue` |
+| GitLab | `if (pipeline.status !== 'failed') continue` |
+| Gitea | identical guard on `run.conclusion !== 'failure'` |
+
+Applying the new conclusion filter to reconciliation would be redundant — the reconciliation path is already stricter than even the default filter would be. If a user opts into `--conclusions success`, reconciliation still only fires on failures; this is consistent with the existing behavior and introduces no new surprise. If future work changes reconciliation to emit non-failure events, the filter should be applied then.
+
 ## Open Questions
 
 ### Critical (Blocks Progress)
 - None — issue #13 answers the major design questions.
 
-### Important (Affects Design)
-- [ ] **Canonicalization scope**: should the filter accept `failed`, `canceled` as-written, or normalize internally? **Answer**: normalize internally. Users who write `--conclusions failure` must match both GitHub's `failure` and GitLab's `failed`. Internal normalization is lossless and hides a forge-leakage from users.
-- [ ] **Empty/null conclusions**: drop or forward? **Answer**: forward (fail-open). An empty string is almost always an in-progress event or a forge quirk; dropping it silently is worse than a stray notification.
-- [ ] **Unknown conclusions** (a value outside the canonical set): drop or forward? **Answer**: forward when using the default list (so new forge outcomes aren't lost until the canonical set is updated). When an explicit `--conclusions` list is provided, match exactly against the normalized list — unknown values from the event are dropped because the user explicitly scoped the output.
+### Important (Affects Design) — resolved during iter-1 review
+- [x] **Canonicalization scope**: normalize internally (lowercase + `failed`→`failure`, `canceled`→`cancelled`). Internal normalization is lossless and hides forge-leakage from users.
+- [x] **Empty / `'unknown'` conclusions**: forwarded under the default filter, dropped under an explicit `--conclusions` list. See "Default Behavior" and "Semantics" sections above.
+- [x] **Non-terminal conclusions** (`requested`, `in_progress`, `running`, `pending`, etc.): excluded from the default filter by name, alongside known non-failure terminals. This resolves the original "failures only vs unknowns forwarded" contradiction flagged in iter-1 review.
+- [x] **`all` sentinel semantics**: case-insensitive, standalone only, mixed lists rejected at config-load.
 
 ### Nice-to-Know (Optimization)
 - [ ] Should the filter emit a log line when dropping events, for observability? Not strictly required for v1 — the existing `ok` response body is sufficient.
@@ -149,13 +185,18 @@ The filter is applied uniformly across all three forges (GitHub, GitLab, Gitea).
 ## Test Scenarios
 
 ### Functional Tests
-1. **Default filter** — no `--conclusions` flag; a `success` event is dropped, a `failure` event is forwarded
-2. **`all` opt-out** — `--conclusions all`; both `success` and `failure` events are forwarded
-3. **Custom list** — `--conclusions failure,success`; both are forwarded, `cancelled` is dropped
-4. **Cross-forge terminology** — `--conclusions failure` forwards both GitHub's `failure` and GitLab's `failed`; `--conclusions cancelled` forwards both `cancelled` and `canceled`
-5. **Empty conclusion** — an event with `conclusion: ""` is forwarded under the default list
-6. **Unknown conclusion** — an event with `conclusion: "xyz"` under the default list is forwarded; under `--conclusions failure` it is dropped
-7. **Config precedence** — CLI flag beats env var beats `.env` file
+1. **Default filter, success dropped** — no `--conclusions` flag; a `success` event is dropped, a `failure` event is forwarded
+2. **Default filter, in-progress dropped** — no flag; events with `conclusion` in `{requested, in_progress, running, pending, queued}` are dropped
+3. **Default filter, action_required forwarded** — no flag; an `action_required` event is forwarded
+4. **`all` opt-out (case-insensitive)** — `--conclusions ALL`; both `success` and `failure` events are forwarded
+5. **Custom inclusion list** — `--conclusions failure,success`; both are forwarded, `cancelled` is dropped
+6. **Cross-forge terminology** — `--conclusions failure` forwards both GitHub's `failure` and GitLab's `failed`; `--conclusions cancelled` forwards both `cancelled` and `canceled`
+7. **Empty / `'unknown'` conclusion** — an event with `conclusion: ""` or `conclusion: "unknown"` is forwarded under the default, dropped under `--conclusions failure`
+8. **Novel unknown conclusion** — an event with `conclusion: "xyz"` under the default is forwarded; under `--conclusions failure` it is dropped
+9. **Mixed `all` rejected** — `--conclusions failure,all` throws at config-load with a clear error
+10. **Config precedence** — CLI flag beats env var beats `.env` file
+11. **Config-layer integration** — `--conclusions failure,SUCCESS` produces `config.conclusions = ['failure', 'success']` after normalization
+12. **Startup banner** — the bootstrap startup notification includes the active filter description
 
 ### Non-Functional Tests
 1. All existing handler tests continue to pass (regression guard)
@@ -183,6 +224,8 @@ The filter is applied uniformly across all three forges (GitHub, GitLab, Gitea).
 
 ## Notes
 
-- The default list should be `failure, cancelled, timed_out` (after normalization). `skipped`, `neutral`, `success`, `action_required`, `stale` are excluded by default.
-- `timed_out` is GitHub-specific; GitLab doesn't emit it. Including it in the default doesn't hurt — it's just a no-op on other forges.
-- The canonical set of recognized values for documentation purposes: `success`, `failure`, `cancelled`, `timed_out`, `skipped`, `neutral`, `action_required`, `stale`, `manual`. Input is normalized: `failed`→`failure`, `canceled`→`cancelled`.
+- Default filter is **exclusion-based** (see "Default Behavior" section). Excluded by default: `success`, `skipped`, `neutral`, `manual`, `stale`, `requested`, `in_progress`, `completed`, `running`, `pending`, `queued`, `waiting`, `preparing`. Everything else (including `failure`, `cancelled`, `timed_out`, `action_required`, and unknown strings) is forwarded.
+- `action_required` is forwarded by default — it signals a workflow awaiting manual intervention, which is failure-adjacent and usually deserves attention.
+- `timed_out` is GitHub-specific; GitLab doesn't emit it. It's handled uniformly via the same pipeline regardless.
+- The canonical set of recognized values for documentation: `success`, `failure`, `cancelled`, `timed_out`, `skipped`, `neutral`, `action_required`, `stale`, `manual`. Input is normalized: lowercase, then `failed`→`failure`, `canceled`→`cancelled`.
+- The existing `splitCommaList` helper uses `.filter(Boolean)`, so trailing commas or empty segments (e.g., `--conclusions "failure,"`) are silently trimmed. Acceptable — users who want strict filtering typically don't want empty states anyway.
